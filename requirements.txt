@@ -1,0 +1,8 @@
+# Aegis Phase 1 dependencies
+# Keep lean — stdlib does the rest (sqlite3, json, datetime, ast, pathlib)
+
+# Anthropic SDK — only needed for live API runs; the stub path works without it.
+anthropic>=0.26.0
+
+# Test runner
+pytest>=8.0

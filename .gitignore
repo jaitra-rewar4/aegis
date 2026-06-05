@@ -52,6 +52,8 @@ coverage/
 *.audit.db
 audit_log.jsonl
 audit_log.db
+# Demo runners write JSONL trails like demos/audit_benign.log.jsonl — generated, not source.
+*.log.jsonl
 
 # ---- Editor / OS ----
 .vscode/
