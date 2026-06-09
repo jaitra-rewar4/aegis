@@ -1,0 +1,3 @@
+# Normalize line endings: store text as LF in the repo, check out native.
+# Kills CRLF/LF churn and noisy line-ending diffs across contributors/OSes.
+* text=auto eol=lf
