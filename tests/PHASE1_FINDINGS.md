@@ -15,11 +15,24 @@ or determinism failures.
 
 ---
 
-## TRACKED MUST-FIX (audit hardening) — reviewer finding, not yet implemented
+## RESOLVED (audit hardening) — write-ahead + fail-closed implemented
 
 **Audit loss if `append_record` raises after an ALLOWed tool has already executed.**
 
-- **Where:** `core/loop.py:227` — the gate decides, the tool executes (`loop.py:216`),
+Resolved by ADR 0002 (write-ahead + fail-closed ordering) implemented in `core/loop.py`
+and `core/audit.py` (fsync durability), proven by `tests/test_write_ahead_audit.py`.
+The `append_record` call was moved to run after `evaluate()` but strictly before the
+ALLOW/DENY branch: if the append fails, no tool executes regardless of the gate decision,
+and an `is_error` tool_result carrying `aegis.audit_unavailable` is synthesised for the
+model.  The loop emits `AuditUnavailableWarning` on every such refusal.  There is no
+latched state — each action retries the append fresh, so the run self-heals the moment
+the log is writable again.  `core/audit.py` now calls `fh.flush()` + `os.fsync()` before
+returning, so "logged" means on durable storage, not sitting in a buffer.
+
+Original finding preserved below for the record (it documents why the fix was designed
+this way):
+
+- **Where (original):** `core/loop.py:227` — the gate decides, the tool executes (`loop.py:216`),
   and only *then* is `append_record` called. If the append raises (disk full, bad
   `log_path`, permissions), the side effect has already happened but no audit record is
   written, and the exception crashes the turn — leaving subsequent blocks unlogged too.
