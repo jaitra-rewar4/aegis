@@ -1,7 +1,8 @@
 """
 audit.py — append-only JSONL audit log (Phase 1 form).
 
-One record per evaluated action, written AFTER the decision is made.
+One record per evaluated action, written AFTER the decision is made and
+BEFORE the action is executed (write-ahead ordering per ADR 0002).
 The timestamp is stamped here, not passed in from evaluate(), so it is
 never an input to the enforcement decision.
 
@@ -97,5 +98,16 @@ def append_record(
     # for now, "a" is both correct and the right semantic signal.
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(record) + "\n")
+        # WHY flush + fsync before the `with` block closes:
+        # Write-ahead ordering (ADR 0002) only delivers the guarantee "no
+        # unlogged executed action" if the record survives a crash in the
+        # window between append_record returning and the tool executing.
+        # A Python write() lands in a userspace buffer; fh.flush() drains that
+        # to the OS page cache, and os.fsync() forces the OS to commit the
+        # page to durable storage before we return.  Without fsync the record
+        # could be lost in a crash even though append_record "succeeded."
+        # Cost: one fsync per action — accepted per ADR 0002 Tradeoff 3.
+        fh.flush()
+        os.fsync(fh.fileno())
 
     return record
