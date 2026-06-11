@@ -73,7 +73,7 @@ class TestDropTableDenied:
         """evaluate() returns DENY with the correct rule_id for DROP TABLE SQL."""
         result = evaluate("execute_sql", {"sql": "DROP TABLE customers"}, context=None)
         assert result.decision is Decision.DENY
-        assert result.rule_id == "phase1.deny_destructive_sql"
+        assert result.rule_id == "sql.deny_destructive"
 
     def test_run_loop_denies_drop_table_and_audits(self, audit_log: Path, db_reset):
         """run_loop yields DENY in the audit trail for a DROP TABLE turn."""
@@ -94,7 +94,7 @@ class TestDropTableDenied:
         assert len(trail) == 1
         record = trail[0]
         assert record["decision"] == "DENY"
-        assert record["rule"] == "phase1.deny_destructive_sql"
+        assert record["rule"] == "sql.deny_destructive"
         assert record["tool"] == "execute_sql"
 
     def test_drop_table_does_not_execute_proven_by_row_survival(
@@ -188,7 +188,7 @@ class TestBenignRunProceeds:
         assert len(trail) == 1
         record = trail[0]
         assert record["decision"] == "ALLOW"
-        assert record["rule"] == "phase1.default_allow"
+        assert record["rule"] == "customers.allow_lookup"
         assert record["tool"] == "lookup_customer"
 
     def test_calculator_allowed(self, audit_log: Path):
@@ -208,7 +208,7 @@ class TestBenignRunProceeds:
         assert len(trail) == 1
         record = trail[0]
         assert record["decision"] == "ALLOW"
-        assert record["rule"] == "phase1.default_allow"
+        assert record["rule"] == "math.allow_calculator"
         assert record["tool"] == "calculator"
 
     def test_benign_tools_actually_execute_and_return_results(
@@ -297,16 +297,25 @@ class TestDeterminism:
         decisions = {r.decision for r in results}
         rule_ids = {r.rule_id for r in results}
         assert decisions == {Decision.DENY}
-        assert rule_ids == {"phase1.deny_destructive_sql"}
+        assert rule_ids == {"sql.deny_destructive"}
+
+    # Per-tool expected rule ids for ALLOW cases (ADR 0003 §e: each allowed
+    # tool now has its own named rule, not a catch-all default_allow).
+    _ALLOW_RULE_IDS = {
+        "execute_sql": "sql.allow_other",
+        "lookup_customer": "customers.allow_lookup",
+        "calculator": "math.allow_calculator",
+    }
 
     @pytest.mark.parametrize("tool,params", ALLOW_CASES)
     def test_repeated_calls_allow_same_result(self, tool, params):
-        """ALLOW is stable across 50 repeated calls."""
+        """ALLOW is stable across 50 repeated calls, with the correct pack rule id."""
         results = [evaluate(tool, params, context=None) for _ in range(50)]
         decisions = {r.decision for r in results}
         rule_ids = {r.rule_id for r in results}
+        expected_rule_id = self._ALLOW_RULE_IDS[tool]
         assert decisions == {Decision.ALLOW}
-        assert rule_ids == {"phase1.default_allow"}
+        assert rule_ids == {expected_rule_id}
 
     def test_context_argument_does_not_affect_decision(self):
         """
@@ -327,7 +336,7 @@ class TestDeterminism:
         ]
         results = [evaluate(tool, params, context=ctx) for ctx in contexts]
         assert all(r.decision is Decision.DENY for r in results)
-        assert all(r.rule_id == "phase1.deny_destructive_sql" for r in results)
+        assert all(r.rule_id == "sql.deny_destructive" for r in results)
 
         # Same for ALLOW
         allow_tool = "lookup_customer"
@@ -374,7 +383,7 @@ class TestAuditIntegrity:
         assert record["tool"] == "execute_sql"
         assert record["params"] == {"sql": "DROP TABLE customers"}
         assert record["decision"] == "DENY"
-        assert record["rule"] == "phase1.deny_destructive_sql"
+        assert record["rule"] == "sql.deny_destructive"
         # Phase 1: hash fields are reserved nulls
         assert record["prev_hash"] is None
         assert record["hash"] is None
@@ -404,7 +413,7 @@ class TestAuditIntegrity:
         assert self.REQUIRED_FIELDS <= set(record.keys())
         assert record["tool"] == "lookup_customer"
         assert record["decision"] == "ALLOW"
-        assert record["rule"] == "phase1.default_allow"
+        assert record["rule"] == "customers.allow_lookup"
         assert record["prev_hash"] is None
         assert record["hash"] is None
 

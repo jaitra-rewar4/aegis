@@ -25,8 +25,11 @@ from pathlib import Path
 # Make the repo root importable when running as __main__
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from core import gateway
 from core.loop import run_loop
 from demos.tools import TOOL_REGISTRY, TOOL_SCHEMAS
+from policy import loader
+from policy.schema import PolicyError
 
 _SYSTEM_PROMPT = (
     "You are a helpful assistant with access to a customer database and a calculator. "
@@ -98,7 +101,27 @@ def _build_stub_fn():
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _configure_policy() -> None:
+    """Load the default policy pack and configure the gateway with it.
+
+    WHY proceed UNCONFIGURED on failure rather than crashing: this is fail-closed,
+    mirroring ADR 0002's refuse-and-continue philosophy. An unconfigured gateway is
+    default-deny everything (policy.no_pack), so a broken pack makes the demo show
+    every action DENIED — a loud, safe signal — instead of aborting startup or, worse,
+    running with no policy.
+    """
+    try:
+        gateway.configure(loader.load(loader.DEFAULT_PACK_PATH))
+        print(f"[benign demo] Policy pack loaded from {loader.DEFAULT_PACK_PATH}")
+    except PolicyError as exc:
+        print(
+            f"[benign demo] POLICY LOAD FAILED ({exc}); proceeding UNCONFIGURED — "
+            "every action will be DENIED (fail-closed)."
+        )
+
+
 def main(force_stub: bool = False) -> None:
+    _configure_policy()
     has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
     use_stub = force_stub or not has_key
 

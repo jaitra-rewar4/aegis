@@ -1,0 +1,58 @@
+# default.yaml — the example policy pack (ADR 0003 §e).
+#
+# Reproduces Phase-1 demo behavior under an explicit default-deny floor:
+#   - destructive execute_sql is DENIED,
+#   - all other execute_sql, lookup_customer, and calculator calls are ALLOWED,
+#   - any tool no rule names is DENIED by `default: deny`.
+#
+# Precedence is first-match-wins in this file order (ADR 0003 §d): the destructive
+# SQL DENY is placed ABOVE the broad execute_sql ALLOW, so destructive statements hit
+# the DENY and everything else on execute_sql falls through to the ALLOW.
+
+version: 1
+default: deny
+
+rules:
+  # 1. Destructive SQL — DENY. Placed first so it wins over sql.allow_other below.
+  - id: sql.deny_destructive
+    rationale: >-
+      STOPGAP, NOT REAL SQL SAFETY. Denies execute_sql when the statement contains a
+      destructive keyword (DROP/DELETE/TRUNCATE/ALTER) under the exact Phase-1
+      keyword scan. This is a documented-gap keyword stopgap pending a real SQL
+      parser: the negative form (allow-unless-keyword) still lets comment-splitting,
+      unicode/hex look-alikes, and unlisted verbs (UPDATE/MERGE/GRANT...) reach ALLOW,
+      exactly as documented in tests/PHASE1_FINDINGS.md (gap classes 7a/7c/7d). The
+      secure form is a positive "allow only provably-safe SQL" rule, deferred to a
+      real parser. Default-deny closes the unknown-tool gap, NOT this one.
+    tool: execute_sql
+    when:
+      sql:
+        contains_keyword: [DROP, DELETE, TRUNCATE, ALTER]
+    effect: DENY
+
+  # 2. Any other execute_sql — ALLOW. Reached only when rule 1 did not match.
+  - id: sql.allow_other
+    rationale: >-
+      Allows non-destructive execute_sql (SELECT, INSERT of seed data, etc.). This is
+      the negative-form companion to sql.deny_destructive above: anything that did not
+      trip the destructive-keyword DENY is permitted, reproducing Phase-1 behavior.
+    tool: execute_sql
+    effect: ALLOW
+
+  # 3. lookup_customer — ALLOW. Read-only, always allowed in 2a.
+  - id: customers.allow_lookup
+    rationale: >-
+      Allows lookup_customer unconditionally. It is a read-only customer lookup with
+      no destructive capability in 2a. (In 2b this same read becomes the "read
+      sensitive" half of the read->send exfiltration chain a trajectory rule will
+      guard — but that is future work, not enforced here.)
+    tool: lookup_customer
+    effect: ALLOW
+
+  # 4. calculator — ALLOW. Pure arithmetic, always allowed.
+  - id: math.allow_calculator
+    rationale: >-
+      Allows calculator unconditionally. It is pure arithmetic with no side effects
+      and no access to data or external systems.
+    tool: calculator
+    effect: ALLOW
