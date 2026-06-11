@@ -72,7 +72,7 @@ class TestCaseWhitespaceDodges:
         assert result.decision is Decision.DENY, (
             f"BUG: '{sql}' was not DENYed — case/whitespace normalization failed."
         )
-        assert result.rule_id == "phase1.deny_destructive_sql"
+        assert result.rule_id == "sql.deny_destructive"
 
 
 # ---------------------------------------------------------------------------
@@ -303,11 +303,16 @@ class TestParameterAbuseGap:
     @documented_gap
     def test_missing_sql_param_is_allowed(self):
         """
-        If the sql param is missing from params dict entirely, _normalize_sql
-        receives '' (the .get default).  Should be ALLOW, not crash.
+        If the sql param is missing from params dict entirely, the
+        contains_keyword constraint on the missing param does NOT hold
+        (ADR 0003 §c totality: constraint-on-missing-param does not hold).
+        Rule 1 (sql.deny_destructive) therefore does not match; rule 2
+        (sql.allow_other, no when) matches the execute_sql tool -> ALLOW.
+        Should be ALLOW, not crash.
         """
         result = evaluate("execute_sql", {}, context=None)
         assert result.decision is Decision.ALLOW
+        assert result.rule_id == "sql.allow_other"
 
     @documented_gap
     def test_sql_param_on_non_sql_tool_is_allowed(self):
@@ -315,14 +320,17 @@ class TestParameterAbuseGap:
         Passing a destructive SQL string as the customer_id param to
         lookup_customer must be ALLOW — the rule only checks execute_sql.
         This is correct behavior (rule is tool-scoped), not a gap.
+        Under Phase 2, lookup_customer matches customers.allow_lookup (no when)
+        -> ALLOW with rule id "customers.allow_lookup".
         """
         result = evaluate(
             "lookup_customer",
             {"customer_id": "DROP TABLE customers"},
             context=None,
         )
-        # lookup_customer is not execute_sql — always ALLOW in Phase 1
+        # Rule is tool-scoped: lookup_customer matches customers.allow_lookup.
         assert result.decision is Decision.ALLOW
+        assert result.rule_id == "customers.allow_lookup"
 
     @documented_gap
     def test_very_long_sql_with_drop_still_denied(self):
