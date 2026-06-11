@@ -4,5 +4,8 @@
 # Anthropic SDK — only needed for live API runs; the stub path works without it.
 anthropic>=0.26.0
 
+# Declarative policy packs (ADR 0003) — yaml.safe_load only, confined to policy/loader.py.
+pyyaml>=6.0
+
 # Test runner
 pytest>=8.0
