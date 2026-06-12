@@ -57,6 +57,17 @@ class Rule:
     # structural unpacking in the decision path (ADR 0003 §c).
     when: Mapping[str, tuple[str, Any]]
     effect: str  # exactly "ALLOW" or "DENY" in 2a.
+    # `after`: the validated 2b trajectory clause (ADR 0004 §e). Stored as the BARE
+    # validated tool name (a str), or None when the clause is absent.
+    # WHY storing just the tool name is enough: the entire 2b `after` shape is exactly
+    # {tool: <non-empty string>} (ADR 0004 §e open-call (b), pinned) — a single tool
+    # identity to scan the trajectory for. There is no operand, count, or nested
+    # constraint to carry, so a bare string fully captures the validated clause. A
+    # richer frozen structure (a dataclass/MappingProxy) is the natural shape only when
+    # `after` widens to param constraints / multiple tools / counts — explicitly future
+    # work, not 2b (ADR 0004 §e Out of scope). A plain str is also trivially immutable,
+    # so it needs no MappingProxy/tuple wrapping to stay deeply frozen like `when`.
+    after: str | None  # the tool name a prior ALLOWed record must carry, or None.
 
 
 @dataclass(frozen=True)
@@ -80,7 +91,15 @@ _RESERVED_ID_PREFIXES: tuple[str, ...] = ("aegis.", "policy.")
 _ALLOWED_PACK_KEYS: frozenset[str] = frozenset({"version", "default", "rules"})
 
 # The only keys a rule may contain. Anything else -> reject.
-_ALLOWED_RULE_KEYS: frozenset[str] = frozenset({"id", "rationale", "tool", "when", "effect"})
+# `after` joins the set in 2b (ADR 0004 §e): the optional trajectory clause.
+_ALLOWED_RULE_KEYS: frozenset[str] = frozenset({"id", "rationale", "tool", "when", "effect", "after"})
+
+# The only keys an `after` mapping may contain in 2b — exactly the one key `tool`.
+# WHY a named constant for a single-element set: it makes the 2b `after` shape
+# (ADR 0004 §e open-call (b): exactly {tool: <non-empty string>}, nothing else)
+# a reviewable datum, and gives _normalize_after one place to widen when `after`
+# grows param constraints / multiple tools later (explicitly future work).
+_ALLOWED_AFTER_KEYS: frozenset[str] = frozenset({"tool"})
 
 # The only effect values 2a accepts. RATE_LIMIT / REQUIRE_APPROVAL are rejected at
 # load (ADR 0003 Out of scope): the loop treats every non-ALLOW as a blunt refusal
@@ -93,8 +112,12 @@ _ALLOWED_EFFECTS: frozenset[str] = frozenset({"ALLOW", "DENY"})
 _NUMERIC_OPERATORS: frozenset[str] = frozenset({"max", "min"})
 
 # Operators whose operand is a non-empty list of strings.
+# `domain_not_in` joins the set in 2b (ADR 0004 §f): it is the negation of `domain_in`
+# and takes the IDENTICAL operand — a non-empty list of strings (recipient domains).
+# Validating it here, identically to `domain_in`, means a wrong operand type rejects
+# the whole pack by the same mechanism (ADR 0003 §c all-or-nothing).
 _STRING_LIST_OPERATORS: frozenset[str] = frozenset(
-    {"prefix_one_of", "domain_in", "contains_keyword", "not_contains_keyword"}
+    {"prefix_one_of", "domain_in", "domain_not_in", "contains_keyword", "not_contains_keyword"}
 )
 
 # Every recognized operator. Unknown operator -> reject (ADR 0003 §c).
@@ -212,6 +235,58 @@ def _normalize_when(rule_id: str, raw_when: Any) -> dict[str, tuple[str, Any]]:
     return normalized
 
 
+def _normalize_after(rule_id: str, raw_after: Any) -> str:
+    """Validate a raw `after` clause and return the bare tool name, or raise PolicyError.
+
+    Mirrors _normalize_when's discipline (ADR 0004 §e): `after`, when present, must be a
+    dict with EXACTLY one key `tool` whose value is a non-empty string. Anything else
+    rejects the WHOLE pack (the 2a all-or-nothing mandate, ADR 0003 §c, unchanged):
+      - non-dict (list, str, int, None-was-handled-by-caller),
+      - missing / unknown / multi-key set (e.g. {tool, x}, {when: ...}),
+      - `tool` empty or non-string.
+    WHY exactly this one shape and nothing else (ADR 0004 §e open-call (b), pinned):
+    {tool: <non-empty string>} is the minimal, TOTAL, OBVIOUS expression of the read->send
+    pattern — a list scan for a tool name + ALLOW is defined for every trajectory including
+    the empty one, and a non-author reads `after: {tool: lookup_customer}` and predicts
+    "fires only once a lookup_customer was allowed earlier." Param constraints, multiple
+    tools, counts, ordering, and negative forms inside `after` are deliberately future
+    extensions (ADR 0004 §e Out of scope) — we start narrow because widening is
+    backward-compatible and narrowing is not.
+
+    Returns the bare validated tool name (a str). The caller stores it on Rule.after; a
+    None `after` clause is handled by the caller (absent -> Rule.after = None).
+    """
+    if not isinstance(raw_after, dict):
+        raise PolicyError(
+            f"rule '{rule_id}': 'after' must be a mapping {{tool: <non-empty string>}}, "
+            f"got {raw_after!r}"
+        )
+
+    unknown = set(raw_after.keys()) - _ALLOWED_AFTER_KEYS
+    if unknown:
+        raise PolicyError(
+            f"rule '{rule_id}': 'after' has unknown key(s): {sorted(unknown)!r} "
+            f"(the only allowed key in 2b is 'tool')"
+        )
+
+    # Exactly the one key `tool`. After the unknown-key check above, the only remaining
+    # way to fail the count is an EMPTY `after` ({}), which has no `tool` at all. A
+    # multi-key set like {tool, x} is already rejected by the unknown-key check.
+    if len(raw_after) != 1:
+        raise PolicyError(
+            f"rule '{rule_id}': 'after' must have exactly the one key 'tool', "
+            f"got {sorted(raw_after.keys())!r}"
+        )
+
+    after_tool = raw_after.get("tool")
+    if not isinstance(after_tool, str) or not after_tool:
+        raise PolicyError(
+            f"rule '{rule_id}': 'after.tool' must be a non-empty string, got {after_tool!r}"
+        )
+
+    return after_tool
+
+
 def _validate_rule(raw: Any, seen_ids: set[str]) -> Rule:
     """Validate one raw rule dict and return a frozen Rule, or raise PolicyError."""
     if not isinstance(raw, dict):
@@ -262,14 +337,21 @@ def _validate_rule(raw: Any, seen_ids: set[str]) -> Rule:
     raw_when = raw.get("when")
     when = {} if raw_when is None else _normalize_when(rule_id, raw_when)
 
+    # `after` is optional (ADR 0004 §e); absent means the rule never consults the
+    # trajectory and behaves exactly like a 2a rule. Stored as the bare tool name or None.
+    raw_after = raw.get("after")
+    after = None if raw_after is None else _normalize_after(rule_id, raw_after)
+
     # MappingProxyType: a read-only view, so the validated constraint set cannot be
     # mutated in place after validation (deep immutability — see the Rule docstring).
+    # `after` is a bare str (or None), already deeply immutable, so it needs no wrapper.
     return Rule(
         id=rule_id,
         rationale=rationale,
         tool=tool,
         when=MappingProxyType(when),
         effect=effect,
+        after=after,
     )
 
 

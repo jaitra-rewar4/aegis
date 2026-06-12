@@ -1,11 +1,14 @@
 """
-tools.py — fake demo tools for the Phase 1 walking skeleton.
+tools.py — fake demo tools for the Phase 1/2 walking skeleton.
 
-Three tools, one dangerous:
+Four tools, one dangerous, one a 2b addition:
     execute_sql     — runs SQL against a throwaway in-memory SQLite DB.
                       The only tool with irreversible side-effect potential.
     lookup_customer — read-only fake customer lookup (no writes, ever).
     calculator      — pure arithmetic via a safe AST-based evaluator.
+    send_email      — fake email send; returns a success string, NO network I/O
+                      ever (ADR 0004 §a). The "send" half of the 2b read->send
+                      exfiltration chain.
 
 WHY in-memory SQLite for execute_sql: it is throwaway (no file, no network),
 so a DENYed DROP TABLE leaves no persistent damage even if the gate ever
@@ -191,6 +194,26 @@ def calculator(*, expression: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Tool 4: send_email  (fake — no network, no SMTP, no socket, ever)
+# ---------------------------------------------------------------------------
+
+def send_email(*, to: str, subject: str, body: str) -> str:
+    """Return a success string confirming the (fake) send.  No I/O of any kind.
+
+    WHY fake and NO network imports, NO socket, NO SMTP (ADR 0004 §a):
+    The demo must prove the GATE's behavior on a read->send chain — the
+    trajectory rule catching the exfiltration.  A real sender would add a
+    network dependency to the demo and, crucially, a way to actually leak the
+    fake customer data read by lookup_customer.  The gate is what is under test,
+    not real egress; keeping this function pure means a demo or test run can
+    never accidentally exfiltrate anything.  The function is deliberately a stub
+    that a policy-governed agent cannot distinguish from a real sender — the
+    agent proposes it, the gate decides, and the decision is what the demo shows.
+    """
+    return f"[SENT] to={to} subject={subject!r} (body {len(body)} chars)"
+
+
+# ---------------------------------------------------------------------------
 # Registry and schema list (consumed by loop.py and the demo runners)
 # ---------------------------------------------------------------------------
 
@@ -198,6 +221,7 @@ TOOL_REGISTRY: dict[str, Any] = {
     "execute_sql": execute_sql,
     "lookup_customer": lookup_customer,
     "calculator": calculator,
+    "send_email": send_email,
 }
 
 TOOL_SCHEMAS: list[dict[str, Any]] = [
@@ -247,6 +271,32 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                 }
             },
             "required": ["expression"],
+        },
+    },
+    {
+        "name": "send_email",
+        "description": (
+            "Send an email to the specified recipient.  Use this to deliver "
+            "reports, summaries, or status updates to internal staff or known "
+            "business partners."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "Recipient email address (e.g. 'alice@internal.example.com').",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Subject line of the email.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Body text of the email.",
+                },
+            },
+            "required": ["to", "subject", "body"],
         },
     },
 ]
