@@ -5,16 +5,27 @@ evaluate(tool, params, context) -> GatewayResult
 
 INVARIANT 1: this function receives concrete tool name + concrete parameters.
 It NEVER receives model text or tool outputs — those are routed around it by the loop.
+The `context` argument (the trajectory) is a list of prior CONCRETE tool-call audit records
+— never model text and never tool outputs (ADR 0002 froze the record shape to decision-only,
+carrying no output field; ADR 0004 §b). Invariant 1 holds because the trajectory IS prior
+concrete actions.
 
-INVARIANT 2: this is a pure function. Given the same (tool, params) it returns the same
-GatewayResult, every time. There is no LLM call, no random, no clock, no network, no I/O
-inside it. The context argument is accepted but deliberately unread in 2a (see WHY below).
+INVARIANT 2: this is a pure function. Given the same (pack, tool, params, trajectory) it
+returns the same GatewayResult, every time. There is no LLM call, no random, no clock,
+no network, no I/O inside it. decide() is a pure function of four data inputs (ADR 0004 §g).
 
 WHAT CHANGED IN 2a: the decision is no longer a hardcoded Python rule. The DECIDER is now
 the declarative policy engine (policy/engine.py) running over a validated YAML pack. This
 module became a THIN ADAPTER: it holds the configured pack and delegates to
-engine.decide(pack, tool, params). The pack reaches here out-of-band via configure(), NOT
-through context (context is reserved for session trajectory — ADR 0003 §b).
+engine.decide(pack, tool, params, trajectory=...). The pack reaches here out-of-band via
+configure(), NOT through context.
+
+WHAT CHANGED IN 2b: context is no longer unread. It now carries the recorded trajectory
+(the loop's live audit_trail list — a list of write-ahead audit records threaded by the
+loop, ADR 0004 §b/§d). The extraction is TOTAL over every possible Python value (ADR 0004
+§d): list -> trajectory, anything else -> None -> exact 2a behavior. One predicate,
+isinstance(context, list), no KeyError, no attribute access that can raise, no type it
+fails to classify. Reviewing one line predicts the trajectory for every context value.
 
 IMPORT DIRECTION: core importing policy is intended — the gateway CONSUMES the engine.
 policy/ never imports core.loop or core.audit; engine.py imports core.decision only (the
@@ -63,24 +74,47 @@ def configure(pack: Pack | None) -> None:
 def evaluate(
     tool: str,
     params: dict[str, Any],
-    context: Any,  # noqa: ARG001  (accepted, intentionally unread in 2a)
+    context: Any,
 ) -> GatewayResult:
     """Evaluate a proposed tool call and return a GatewayResult.
 
-    Delegates to the pure decision function engine.decide(_ACTIVE_PACK, tool, params).
-    The signature is byte-for-byte the pinned three-argument form (ADR 0001 §1a) so the
-    loop's call site does not change.
+    Delegates to the pure decision function engine.decide(_ACTIVE_PACK, tool, params,
+    trajectory=...). The signature is byte-for-byte the pinned three-argument form
+    (ADR 0001 §1a) so the loop's call site does not change.
 
-    WHY the context parameter exists but is unread (2a):
-    2b introduces trajectory-aware rules (read->send exfiltration chains) that need the
-    session history. Stabilising the three-argument signature now means 2b adds
-    *behaviour* without touching the enforcement path's call sites. Nothing in 2a reads
-    context, so it carries zero nondeterminism today. When 2b reads it, it will read
-    prior concrete tool calls — never model text — so invariant 1 still holds then.
+    The `context` argument now carries the recorded trajectory: the loop's live
+    audit_trail list of write-ahead audit records for this run, threaded through here on
+    every call (ADR 0004 §d). It is NOT unread anymore.
+
+    EXTRACTION SEMANTICS (ADR 0004 §d) — total over every Python value:
+      - context IS a list  ->  it IS the trajectory; pass it as trajectory=context.
+      - context is ANYTHING ELSE (None, str, int, float, an object, ...) -> trajectory=None
+        -> exact 2a behavior (the engine's `after` clause does-not-hold on None, so every
+        2a pack rule decides identically whether trajectory is None or a real list).
+
+    WHY isinstance(context, list) and no other shape: one predicate, total, obvious,
+    fail-toward-2a. A single isinstance check classifies every Python value unambiguously
+    — no KeyError, no attribute lookup that can raise, no type that fails to fall into
+    one branch. The 2a determinism tests assert identical decisions for seven non-list
+    context values; this branch handles them all in the else arm with zero special-casing.
+    (ADR 0004 §d)
+
+    WHY invariant 1 holds with the trajectory: the trajectory is prior concrete tool
+    calls as logged audit records — {tool, params, decision, rule, ...} — never model
+    text and never tool outputs (the record shape carries no output field, ADR 0002).
+    The loop still routes only tool_use blocks to evaluate(); text blocks are ignored.
+
+    WHY invariant 2 holds: decide() is a pure function of (pack, tool, params,
+    trajectory) — no LLM, no random, no clock, no network, no I/O (ADR 0004 §g).
+    Same four data inputs -> same GatewayResult, every time.
 
     WHY decision-before-execution is structural, not conventional:
     evaluate() is a pure computation. The loop (loop.py) calls it and inspects the
     returned Decision *before* it ever calls the tool function. execute() is reachable
     only through the ALLOW branch; there is no other path to it.
     """
-    return engine.decide(_ACTIVE_PACK, tool, params)
+    # WHY this exact, totally-pinned branch and no other (ADR 0004 §d):
+    # list -> trajectory so the engine can scan prior ALLOWed actions;
+    # anything else -> None -> exact 2a behavior, no crash, no KeyError.
+    trajectory = context if isinstance(context, list) else None
+    return engine.decide(_ACTIVE_PACK, tool, params, trajectory=trajectory)

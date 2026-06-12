@@ -56,3 +56,40 @@ rules:
       and no access to data or external systems.
     tool: calculator
     effect: ALLOW
+
+  # 5. send_email exfil — DENY. The 2b trajectory rule (ADR 0004 §e).
+  #    Placed FIRST among the send_email rules so it wins when it matches; the order
+  #    BETWEEN this rule and email.allow_known_domains below is load-bearing
+  #    (first-match-wins, ADR 0003 §d). Order relative to the four rules above is
+  #    irrelevant — they name different tools.
+  - id: email.deny_exfil_after_read
+    rationale: >-
+      Blocks egress to any non-internal recipient once a sensitive customer read was
+      ALLOWed earlier in this run — the read->send exfiltration chain, caught at the
+      action layer on the recorded sequence of concrete calls (ADR 0004). It keys on
+      TOOL IDENTITY, not on data provenance: it fires because a lookup_customer was
+      ALLOWed and a non-internal send is now proposed, NOT because the send's body
+      actually carries the read data (body content is never inspected). One ALLOWed
+      read taints ALL later non-internal sends for the rest of the run — coarse and
+      fail-safe by design: a false DENY costs a refused benign send; a false ALLOW
+      costs a leak, so we choose the cheaper failure.
+    tool: send_email
+    after:
+      tool: lookup_customer
+    when:
+      to:
+        domain_not_in: [internal.example.com]
+    effect: DENY
+
+  # 6. send_email to known domains — ALLOW. Reached only when rule 5 did not match.
+  - id: email.allow_known_domains
+    rationale: >-
+      Allows sends to known-good internal and partner domains. Reached only when the
+      exfil rule above did not match (no ALLOWed lookup_customer earlier in the run, or
+      the recipient is internal.example.com). Any other recipient falls through to
+      default: deny.
+    tool: send_email
+    when:
+      to:
+        domain_in: [internal.example.com, partner.example.com]
+    effect: ALLOW

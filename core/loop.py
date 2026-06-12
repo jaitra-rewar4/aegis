@@ -10,7 +10,13 @@ and other tests can inject a stub that returns pre-built content blocks,
 exercising the full interception + audit + tool-execution path without any
 network call.
 
-Control flow per assistant turn (see ADR 0001 §1, ADR 0002):
+TRAJECTORY OWNERSHIP (ADR 0004 §b/§d): run_loop owns the trajectory — the
+in-memory audit_trail list of write-ahead records for this run.  It threads
+audit_trail into every gateway.evaluate() call as the context argument.  The
+trajectory therefore contains strictly EARLIER actions at every decision point
+(see the "strictly-earlier-actions property" note at the evaluate call site).
+
+Control flow per assistant turn (see ADR 0001 §1, ADR 0002, ADR 0004):
 
     model returns content blocks
             │
@@ -19,7 +25,10 @@ Control flow per assistant turn (see ADR 0001 §1, ADR 0002):
             │
             └─ for each tool_use block:
                      │
-                     gateway.evaluate(tool, params, context)   ← pure, sync
+                     gateway.evaluate(tool, params, audit_trail)  ← pure, sync
+                     │     trajectory = audit_trail at this instant (ADR 0004 §b):
+                     │     strictly EARLIER actions only — current proposal never
+                     │     sees itself (write-ahead ordering, ADR 0002).
                      │
                      append audit record (write-ahead, flush+fsync)  ← ADR 0002
                      │                   WHY before execute: guarantees no action
@@ -180,7 +189,6 @@ def run_loop(
     max_turns: int = 10,
     log_path: Path | str | None = None,
     model_turn_fn: ModelTurnFn | None = None,
-    context: Any = None,
 ) -> list[dict[str, Any]]:
     """Run the governed tool-use loop and return the full audit trail for this run.
 
@@ -208,10 +216,14 @@ def run_loop(
         This is the testability seam: red-team and unit tests pass a
         deterministic stub so the full interception path runs without a live
         API key or network.
-    context:
-        Session context handle passed through to gateway.evaluate() on every
-        call.  Unread by the Phase 1 rule; accepted to stabilise the signature
-        (see ADR 0001 §1a).
+
+    Notes
+    -----
+    The caller-facing `context=` parameter that existed in 2a has been REMOVED
+    (ADR 0004 §d, review decision confirmed).  The loop now OWNS the trajectory
+    — its live audit_trail list — and threads it directly into every
+    gateway.evaluate() call.  There is no longer a second, caller-supplied handle
+    to confuse a reader: one owner, one trajectory, one path to decide.
 
     Returns
     -------
@@ -262,7 +274,18 @@ def run_loop(
             # WHY exact enum comparison (not truthiness): Decision.DENY is still
             # a truthy enum member.  `is Decision.ALLOW` is unambiguous and
             # cannot be fooled by a future enum member.
-            result = evaluate(tool_name, params, context)
+            #
+            # WHY audit_trail is passed as the context/trajectory argument here
+            # (ADR 0004 §b): the trajectory IS the in-memory list of write-ahead
+            # audit records for this run — the same list that append_record/
+            # audit_trail.append populates AFTER evaluate returns (see below).
+            # Because evaluate runs BEFORE this action's record is appended,
+            # audit_trail at this instant contains records for actions 1..N-1 only
+            # — STRICTLY EARLIER actions.  The current proposal never sees itself.
+            # This falls out of ADR 0002's write-ahead ordering for free, with no
+            # special-casing: there is no "skip the last record," no index
+            # arithmetic, no risk of a rule matching the very call it is judging.
+            result = evaluate(tool_name, params, audit_trail)
 
             # --- write-ahead audit (ADR 0002) ---------------------------------
             # WHY append_record runs AFTER evaluate but BEFORE execute/deny:

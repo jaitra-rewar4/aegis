@@ -1,7 +1,7 @@
 """
 engine.py — the pure policy decision function (ADR 0003 §b, §c, §d, §f).
 
-    decide(pack, tool, params) -> GatewayResult
+    decide(pack, tool, params, trajectory=None) -> GatewayResult
 
 PURITY BOUNDARY (ADR 0003 §a/§b — a module boundary, not a discipline):
 this module imports NO loader, NO yaml, and touches NO clock, random, network, or
@@ -13,10 +13,15 @@ imports of this one file: core.decision is the shared decision vocabulary, and
 policy.schema supplies the Pack/Rule input types — schema.py itself performs no I/O
 (that is the boundary that matters; loader.py is the only module that touches disk).
 
-DETERMINISM (invariant 2): decide is a pure function of (pack, tool, params).
+DETERMINISM (invariant 2): decide is a pure function of (pack, tool, params, trajectory).
 First-match-wins over a stably-ordered rule list (ADR 0003 §d). Operators are
 arithmetic / membership / prefix / split only — total on missing and wrong-typed
-params (ADR 0003 §c). Same inputs -> same GatewayResult, every time.
+params (ADR 0003 §c). The 2b `after` clause (ADR 0004 §e) adds a fourth DATA input,
+the trajectory: a pure sequence/membership scan over recorded prior actions — "does an
+ALLOWed record with this tool exist earlier in the list" — NEVER time-based (no clock,
+no `ts` comparison, no "within N seconds"; ADR 0004 §g). Adding a data input adds no
+nondeterminism (it is input exactly like `params`). Same inputs -> same GatewayResult,
+every time.
 """
 
 from __future__ import annotations
@@ -154,12 +159,45 @@ def _op_not_contains_keyword(param: Any, operand: list) -> bool:
     return not _op_contains_keyword(param, operand)
 
 
+def _op_domain_not_in(param: Any, operand: list) -> bool:
+    """True only when param IS a well-formed address whose domain is NOT in the list.
+
+    Holds iff param is a string with EXACTLY one '@' AND its lowercased domain is NOT in
+    the lowercased operand list (ADR 0004 §f). It follows the EXACT pattern of
+    not_contains_keyword: it is only ever reached AFTER the missing-param chokepoint in
+    _constraint_holds, so a MISSING `to` param returns False there before this runs — the
+    negation trap from 2a is already structurally closed, no new trap is opened.
+
+    THE TRAP, pinned explicitly (ADR 0004 §f): this is NOT `not _op_domain_in(...)`.
+    A malformed address — two '@' ("a@b@evil.com"), zero '@' ("no-at"), "", or a
+    non-string — has NO parseable domain, so `_op_domain_in` returns False for it, and
+    `not False` would be True: a garbage recipient would WRONGLY satisfy domain_not_in
+    (and, on the exfil DENY rule, get DENYed for the wrong reason — or worse, satisfy an
+    ALLOW guard phrased this way). The honest answer for "a string whose PARSEABLE domain
+    is outside the list" when there is no parseable domain is False. So we reuse
+    _op_domain_in's EXACT parsing discipline (one '@', split, lowercase) and return False
+    on anything malformed — fail toward not-matching, the same direction as every other
+    totality rule. Under default-deny a malformed `to` then falls through both send rules
+    to the floor (ADR 0004 §f): denied by the floor, not by the operator pretending to
+    understand it.
+    """
+    if not isinstance(param, str):
+        return False
+    if param.count("@") != 1:
+        # Same exact-one-'@' discipline as _op_domain_in: no parseable domain -> not such
+        # a string -> does-not-hold (NOT "its nonexistent domain isn't listed, so true").
+        return False
+    domain = param.split("@", 1)[1].lower()
+    return not any(domain == d.lower() for d in operand)
+
+
 _OPERATOR_EVALUATORS = {
     "max": _op_max,
     "min": _op_min,
     "one_of": _op_one_of,
     "prefix_one_of": _op_prefix_one_of,
     "domain_in": _op_domain_in,
+    "domain_not_in": _op_domain_not_in,
     "contains_keyword": _op_contains_keyword,
     "not_contains_keyword": _op_not_contains_keyword,
 }
@@ -178,14 +216,55 @@ def _constraint_holds(params: dict, param_name: str, operator: str, operand: Any
     return evaluator(params[param_name], operand)
 
 
-def _rule_matches(rule: Rule, tool: str, params: dict) -> bool:
-    """A rule matches iff its tool equals the call's tool AND every `when` holds.
+def _after_holds(after_tool: str | None, trajectory: Any) -> bool:
+    """True iff the rule's `after` clause holds against the recorded trajectory (ADR 0004 §e).
 
-    Constraints are conjunctive (ALL must hold). WHY iteration order over `when` does
-    not affect the outcome: the result is an AND of predicates, so dict iteration order
-    changes only short-circuit timing, never the decision (ADR 0003 §d, determinism).
+    - `after_tool is None` -> True, WITHOUT touching the trajectory. WHY: a 2a rule has no
+      `after` clause, so it must never read the trajectory at all — this is what makes a
+      None/[]/junk trajectory byte-for-byte identical to 2a for any pack with no `after`
+      rule (ADR 0004 §c). The clause being absent is a vacuous True, not a scan.
+    - trajectory is None or empty -> False. A missing/empty trajectory means there is
+      nothing to match against, so the predicate is honestly False (the same fail-safe
+      direction as a missing param, ADR 0004 §e): default-deny converts not-matching into
+      the safe outcome.
+    - otherwise: True iff SOME entry is a dict AND entry.get("tool") == after_tool AND
+      entry.get("decision") == "ALLOW" (ADR 0004 §e open-call (a): ALLOW-only — a DENYed
+      read never executed, so no data was read; matching it would fire on a ghost).
+
+    TOTALITY (ADR 0004 §e review-added build requirement): the scan is total over WHATEVER
+    the list contains. `trajectory` is an externally-reachable input — a caller can hand
+    `evaluate` any list — and the gate must NEVER be crashable from its inputs (a crash in
+    evaluate is a denial-of-decision, and an exception path nobody reasoned about). So a
+    non-dict entry (int, str, None, arbitrary object) is classified not-a-match BEFORE any
+    field access (isinstance check first), and field access uses .get(...) with safe
+    defaults — NEVER entry["tool"] / entry.decision, which would KeyError / AttributeError
+    on junk. Junk entries fail toward not-matching, the same direction as every other
+    totality rule in this design.
+    """
+    if after_tool is None:
+        return True
+    if not trajectory:  # None or empty list -> nothing recorded -> does-not-hold.
+        return False
+    for entry in trajectory:
+        # isinstance gate FIRST: a non-dict entry is not-a-match before any field access,
+        # so .get below is only ever called on a real dict (no AttributeError on junk).
+        if isinstance(entry, dict) and entry.get("tool") == after_tool and entry.get("decision") == "ALLOW":
+            return True
+    return False
+
+
+def _rule_matches(rule: Rule, tool: str, params: dict, trajectory: Any) -> bool:
+    """A rule matches iff tool equals the call's tool AND `after` holds AND every `when` holds.
+
+    The three are conjunctive (ADR 0004 §e: `after` is conjunctive with tool and when).
+    WHY iteration order over `when` does not affect the outcome: the result is an AND of
+    predicates, so dict iteration order changes only short-circuit timing, never the
+    decision (ADR 0003 §d, determinism). For a rule with `after is None`, _after_holds
+    returns True without reading the trajectory, so a 2a rule never touches it.
     """
     if rule.tool != tool:
+        return False
+    if not _after_holds(rule.after, trajectory):
         return False
     for param_name, (operator, operand) in rule.when.items():
         if not _constraint_holds(params, param_name, operator, operand):
@@ -193,16 +272,27 @@ def _rule_matches(rule: Rule, tool: str, params: dict) -> bool:
     return True
 
 
-def decide(pack: Pack | None, tool: str, params: dict) -> GatewayResult:
+def decide(
+    pack: Pack | None, tool: str, params: dict, trajectory: Any = None
+) -> GatewayResult:
     """Evaluate one proposed action against the pack and return a GatewayResult.
 
-    Pure in (pack, tool, params): no I/O, no clock, no random, no network (invariant 2).
+    Pure in (pack, tool, params, trajectory): no I/O, no clock, no random, no network
+    (invariant 2). `trajectory` is the recorded list of prior concrete actions (ADR 0004
+    §b/§c) — input DATA exactly like `params`.
 
-    Order (ADR 0003 §b/§d/§f):
+    ADDITIVE signature (ADR 0004 §c): `trajectory` defaults to None, so every existing
+    2a call site `decide(pack, tool, params)` is byte-for-byte unchanged. A None/empty
+    trajectory reproduces 2a behavior EXACTLY: it is only ever read by the `after` clause
+    (via _after_holds), a pack with no `after` rule never touches it, and None/[] makes
+    every `after` clause not-hold — so a 2a pack decides identically whether trajectory is
+    None, [], or a full history.
+
+    Order (ADR 0003 §b/§d/§f, ADR 0004 §e):
       1. No pack configured -> DENY / policy.no_pack (the literal default of an
          unconfigured engine — default-deny without a spec).
-      2. First-match-wins, top to bottom: the first rule whose tool matches and whose
-         `when` holds returns its effect + id immediately.
+      2. First-match-wins, top to bottom: the first rule whose tool matches, whose
+         `after` holds, and whose `when` holds returns its effect + id immediately.
       3. No rule matched -> the pack's declared default: deny -> DENY/policy.default_deny,
          allow -> ALLOW/policy.default_allow.
     """
@@ -210,7 +300,7 @@ def decide(pack: Pack | None, tool: str, params: dict) -> GatewayResult:
         return GatewayResult(decision=Decision.DENY, rule_id=RULE_NO_PACK)
 
     for rule in pack.rules:
-        if _rule_matches(rule, tool, params):
+        if _rule_matches(rule, tool, params, trajectory):
             decision = Decision.ALLOW if rule.effect == "ALLOW" else Decision.DENY
             return GatewayResult(decision=decision, rule_id=rule.id)
 
