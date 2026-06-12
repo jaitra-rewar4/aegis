@@ -556,6 +556,8 @@ def test_loader_loads_default_pack():
         "sql.allow_other",
         "customers.allow_lookup",
         "math.allow_calculator",
+        "email.deny_exfil_after_read",
+        "email.allow_known_domains",
     ]
     # The destructive-SQL rule's rationale states it is a documented-gap stopgap.
     deny_rule = pack.rules[0]
@@ -634,8 +636,12 @@ def test_gateway_configure_matches_engine_decide():
 
 
 @pytest.mark.parametrize("context", [None, {}, {"trajectory": []}, [1, 2, 3], "anything", object()])
-def test_gateway_signature_context_unread(context):
-    # The third argument is accepted and ignored in 2a — varying it changes nothing.
+def test_gateway_context_does_not_affect_no_after_rules(context):
+    # Since 2b (ADR 0004 §d), context is NOT ignored: a list context is extracted
+    # as the trajectory and passed to engine.decide; any non-list context yields
+    # trajectory=None (exact 2a behavior). The decision is still invariant here
+    # because rules WITHOUT an `after` clause never read the trajectory — which
+    # is precisely what this test pins for every context shape, list or not.
     gateway.configure(loader.load(loader.DEFAULT_PACK_PATH))
     r = gateway.evaluate("calculator", {"expression": "1+1"}, context)
     assert r.decision is Decision.ALLOW
@@ -676,7 +682,9 @@ def test_default_pack_calculator_allowed(default_pack):
 
 
 def test_default_pack_unknown_tool_denied(default_pack):
-    r = engine.decide(default_pack, "send_email", {"to": "x@y.com"})
+    # send_email became a KNOWN tool in 2b (ADR 0004), so a genuinely un-named tool is
+    # used here to keep this test pinning the default-deny floor for unknown tools.
+    r = engine.decide(default_pack, "delete_database", {"target": "all"})
     assert r.decision is Decision.DENY
     assert r.rule_id == RULE_DEFAULT_DENY
 
@@ -686,3 +694,313 @@ def test_default_pack_all_destructive_verbs_denied(default_pack, verb):
     r = engine.decide(default_pack, "execute_sql", {"sql": f"{verb} FROM customers"})
     assert r.decision is Decision.DENY
     assert r.rule_id == "sql.deny_destructive"
+
+
+# ===========================================================================
+# 2b SCHEMA — the `after` clause (ADR 0004 §e)
+# ===========================================================================
+
+def _after_rule_pack(after, **rule_overrides):
+    """A valid pack whose single rule carries the given `after` clause."""
+    rule = {
+        "id": "r.after",
+        "rationale": "trajectory-gated rule",
+        "tool": "send_email",
+        "after": after,
+        "effect": "DENY",
+    }
+    rule.update(rule_overrides)
+    return _minimal_pack_dict(rules=[rule])
+
+
+def test_after_valid_clause_accepted_stores_bare_tool_name():
+    pack = validate(_after_rule_pack({"tool": "lookup_customer"}))
+    rule = pack.rules[0]
+    # ADR 0004 §e: `after` is stored as the bare validated tool name (str), None when absent.
+    assert rule.after == "lookup_customer"
+    assert isinstance(rule.after, str)
+
+
+def test_rule_without_after_has_none():
+    # Every existing-style rule (no `after` key) must have Rule.after is None so it never
+    # consults the trajectory (2a behavior preserved).
+    pack = validate(_minimal_pack_dict())
+    assert pack.rules[0].after is None
+
+
+@pytest.mark.parametrize(
+    "after",
+    [
+        "lookup_customer",            # non-dict: a bare string
+        5,                            # non-dict: an int
+        ["lookup_customer"],          # non-dict: a list
+        [],                           # non-dict: an empty list
+        {},                           # dict, but zero keys (no `tool`)
+        {"reader": "lookup_customer"},  # single but UNKNOWN key
+        {"tool": "lookup_customer", "x": 1},  # multi-key {tool, x}
+        {"tool": ""},                 # empty `tool` string
+        {"tool": None},               # non-string `tool`
+        {"tool": 5},                  # non-string `tool`
+        {"tool": ["lookup_customer"]},  # non-string `tool` (list)
+        {"tool": "a", "tool2": "b"},  # multi-key, both unknown-ish
+    ],
+)
+def test_after_rejection_classes(after):
+    # Any malformed `after` rejects the WHOLE pack (ADR 0003 §c all-or-nothing, ADR 0004 §e).
+    with pytest.raises(PolicyError):
+        validate(_after_rule_pack(after))
+
+
+# ===========================================================================
+# 2b SCHEMA — the `domain_not_in` operand validation (ADR 0004 §f)
+# ===========================================================================
+
+def test_domain_not_in_valid_operand_accepted():
+    raw = _minimal_pack_dict(
+        rules=[
+            {
+                "id": "r.dni",
+                "rationale": "ok",
+                "tool": "send_email",
+                "when": {"to": {"domain_not_in": ["internal.example.com"]}},
+                "effect": "DENY",
+            }
+        ]
+    )
+    pack = validate(raw)
+    # Validated identically to domain_in: list operand frozen to a tuple.
+    assert pack.rules[0].when == {"to": ("domain_not_in", ("internal.example.com",))}
+
+
+@pytest.mark.parametrize("operand", [[], "internal.example.com", 5, [1], [True], [None]])
+def test_domain_not_in_bad_operand_rejected(operand):
+    # Empty list, non-list, and non-string items all reject the whole pack — same as domain_in.
+    raw = _minimal_pack_dict(
+        rules=[
+            {
+                "id": "r.dni",
+                "rationale": "ok",
+                "tool": "send_email",
+                "when": {"to": {"domain_not_in": operand}},
+                "effect": "DENY",
+            }
+        ]
+    )
+    with pytest.raises(PolicyError):
+        validate(raw)
+
+
+# ===========================================================================
+# 2b ENGINE — `_after_holds` via decide (ADR 0004 §e)
+# A DENY rule guarded only by `after` (no `when`): when `after` holds -> DENY by rule id;
+# when it does not -> falls through to default-deny (policy.default_deny). The taint
+# tool is lookup_customer; the gated tool is send_email.
+# ===========================================================================
+
+def _after_only_pack():
+    return validate(_after_rule_pack({"tool": "lookup_customer"}))
+
+
+def _rec(tool, decision):
+    """A minimal well-formed trajectory record (the audit-record shape: {tool, decision, ...})."""
+    return {"tool": tool, "params": {}, "decision": decision, "rule": "x"}
+
+
+def _decide_after(trajectory):
+    return engine.decide(_after_only_pack(), "send_email", {"to": "x@evil.com"}, trajectory)
+
+
+def test_after_with_none_trajectory_does_not_match():
+    # after present + trajectory None -> after does-not-hold -> rule falls through.
+    r = _decide_after(None)
+    assert r.decision is Decision.DENY and r.rule_id == RULE_DEFAULT_DENY
+
+
+def test_after_with_empty_trajectory_does_not_match():
+    r = _decide_after([])
+    assert r.decision is Decision.DENY and r.rule_id == RULE_DEFAULT_DENY
+
+
+def test_after_with_allowed_matching_record_matches():
+    r = _decide_after([_rec("lookup_customer", "ALLOW")])
+    assert r.decision is Decision.DENY and r.rule_id == "r.after"
+
+
+def test_after_with_denied_matching_record_only_does_not_match():
+    # ALLOW-only pinned (ADR 0004 §e open-call (a)): a DENYed read never executed, no data
+    # was read, so it must NOT taint a later send.
+    r = _decide_after([_rec("lookup_customer", "DENY")])
+    assert r.decision is Decision.DENY and r.rule_id == RULE_DEFAULT_DENY
+
+
+def test_after_with_different_tool_record_does_not_match():
+    r = _decide_after([_rec("calculator", "ALLOW")])
+    assert r.decision is Decision.DENY and r.rule_id == RULE_DEFAULT_DENY
+
+
+# ===========================================================================
+# 2b ENGINE — TOTALITY probes: arbitrary junk in the trajectory (ADR 0004 §e)
+# The scan must be total over whatever the list contains — junk must NOT crash and
+# must NOT match (isinstance gate + .get with safe defaults, never entry["tool"]).
+# ===========================================================================
+
+_JUNK_TRAJECTORY = [
+    42,                              # non-dict: int
+    "string",                        # non-dict: str
+    None,                            # non-dict: None
+    object(),                        # non-dict: arbitrary object
+    {"no_tool_field": 1},            # dict missing both tool and decision
+    {"tool": "lookup_customer"},     # dict missing decision
+    {"decision": "ALLOW"},           # dict missing tool
+]
+
+
+def test_after_totality_pure_junk_does_not_crash_and_does_not_match():
+    # No well-formed ALLOWed lookup_customer record -> must not match, must not raise.
+    r = _decide_after(list(_JUNK_TRAJECTORY))
+    assert r.decision is Decision.DENY and r.rule_id == RULE_DEFAULT_DENY
+
+
+def test_after_totality_junk_plus_real_record_matches():
+    # Same junk PLUS one well-formed ALLOW record -> junk skipped, real record found -> match.
+    r = _decide_after(list(_JUNK_TRAJECTORY) + [_rec("lookup_customer", "ALLOW")])
+    assert r.decision is Decision.DENY and r.rule_id == "r.after"
+
+
+# ===========================================================================
+# 2b ENGINE — `domain_not_in` semantics (ADR 0004 §f)
+# A DENY guard on send_email keyed only on `to`'s domain_not_in: holds -> DENY by rule id,
+# does-not-hold -> falls to default-deny. (No `after`, so the trajectory is irrelevant.)
+# ===========================================================================
+
+def _domain_not_in_pack():
+    return validate(
+        _minimal_pack_dict(
+            rules=[
+                {
+                    "id": "dni.guard",
+                    "rationale": "deny non-internal",
+                    "tool": "send_email",
+                    "when": {"to": {"domain_not_in": ["internal.example.com"]}},
+                    "effect": "DENY",
+                }
+            ]
+        )
+    )
+
+
+def _decide_dni(params):
+    return engine.decide(_domain_not_in_pack(), "send_email", params)
+
+
+def test_domain_not_in_holds_for_external_domain():
+    r = _decide_dni({"to": "spy@evil.com"})
+    assert r.decision is Decision.DENY and r.rule_id == "dni.guard"
+
+
+def test_domain_not_in_does_not_hold_for_listed_domain_case_insensitive():
+    # Listed domain -> NOT in the negation set -> does-not-hold -> falls through.
+    r = _decide_dni({"to": "alice@internal.example.com"})
+    assert r.decision is Decision.DENY and r.rule_id == RULE_DEFAULT_DENY
+    r = _decide_dni({"to": "alice@INTERNAL.EXAMPLE.COM"})  # case-insensitive
+    assert r.decision is Decision.DENY and r.rule_id == RULE_DEFAULT_DENY
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"to": "a@b@evil.com"},   # two '@' -> malformed -> does NOT hold (not `not domain_in`)
+        {"to": "no-at-sign"},     # zero '@'
+        {"to": ""},               # empty string
+        {"to": 5},                # non-string
+        {},                       # missing param (chokepoint) -> does NOT hold
+    ],
+)
+def test_domain_not_in_malformed_does_not_hold(params):
+    # THE TRAP (ADR 0004 §f): malformed/missing must NOT satisfy domain_not_in — it has no
+    # parseable domain, so the honest answer is False. Falls through to default-deny.
+    r = _decide_dni(params)
+    assert r.decision is Decision.DENY and r.rule_id == RULE_DEFAULT_DENY
+
+
+# ===========================================================================
+# 2b REGRESSION — the additive signature reproduces 2a byte-for-byte (ADR 0004 §c)
+# ===========================================================================
+
+def test_decide_still_callable_with_no_trajectory_arg():
+    # The signature is additive: every 2a call site decide(pack, tool, params) works
+    # positionally and unchanged.
+    pack = validate(_minimal_pack_dict())
+    r = engine.decide(pack, "calculator", {"x": 1})
+    assert r.decision is Decision.ALLOW and r.rule_id == "demo.allow_calc"
+
+
+@pytest.mark.parametrize(
+    "tool,params",
+    [
+        ("calculator", {"x": 1}),
+        ("execute_sql", {"sql": "DROP TABLE t"}),
+        ("execute_sql", {"sql": "SELECT 1"}),
+        ("unknown_tool", {}),
+    ],
+)
+def test_2a_pack_ignores_trajectory_none_vs_junk(tool, params):
+    # A pack with NO `after` rule must decide IDENTICALLY for trajectory=None vs an
+    # arbitrary junk trajectory — proving 2a rules never read the trajectory (ADR 0004 §c).
+    pack = loader.load(loader.DEFAULT_PACK_PATH)  # default pack's non-email rules have no `after`
+    junk = list(_JUNK_TRAJECTORY) + [_rec("lookup_customer", "ALLOW"), _rec("anything", "DENY")]
+    without = engine.decide(pack, tool, params)
+    with_none = engine.decide(pack, tool, params, None)
+    with_junk = engine.decide(pack, tool, params, junk)
+    assert without.decision is with_none.decision is with_junk.decision
+    assert without.rule_id == with_none.rule_id == with_junk.rule_id
+
+
+# ===========================================================================
+# 2b DEFAULT PACK — the proof-of-worth pair (ADR 0004): same call, two histories
+# ===========================================================================
+
+def test_default_pack_partner_send_allowed_with_empty_trajectory(default_pack):
+    # No lookup_customer earlier -> exfil DENY does-not-hold -> falls to domain_in ALLOW.
+    r = engine.decide(default_pack, "send_email",
+                      {"to": "ceo@partner.example.com", "subject": "s", "body": "b"}, [])
+    assert r.decision is Decision.ALLOW and r.rule_id == "email.allow_known_domains"
+
+
+def test_default_pack_partner_send_denied_after_allowed_read(default_pack):
+    # SAME call, but an ALLOWed lookup_customer is now earlier in the run -> exfil DENY fires.
+    tainted = [_rec("lookup_customer", "ALLOW")]
+    r = engine.decide(default_pack, "send_email",
+                      {"to": "ceo@partner.example.com", "subject": "s", "body": "b"}, tainted)
+    assert r.decision is Decision.DENY and r.rule_id == "email.deny_exfil_after_read"
+
+
+def test_default_pack_internal_send_allowed_even_when_tainted(default_pack):
+    # internal.example.com is the one domain NOT in the exfil set -> domain_not_in
+    # does-not-hold -> exfil rule does not match even with the tainted trajectory ->
+    # falls to email.allow_known_domains.
+    tainted = [_rec("lookup_customer", "ALLOW")]
+    r = engine.decide(default_pack, "send_email", {"to": "team@internal.example.com"}, tainted)
+    assert r.decision is Decision.ALLOW and r.rule_id == "email.allow_known_domains"
+
+
+def test_default_pack_evil_send_denied_by_floor_not_exfil(default_pack):
+    # No read earlier, recipient not allowlisted -> exfil rule does-not-hold (after fails),
+    # allow rule does-not-hold (domain not listed) -> DENIED BY THE FLOOR, not the exfil rule.
+    r = engine.decide(default_pack, "send_email", {"to": "spy@evil.com"}, [])
+    assert r.decision is Decision.DENY and r.rule_id == RULE_DEFAULT_DENY
+
+
+# ===========================================================================
+# 2b DETERMINISM (invariant 2): 50 repeats with a fixed tainted trajectory
+# ===========================================================================
+
+def test_2b_determinism_repeated_decisions_identical(default_pack):
+    tainted = list(_JUNK_TRAJECTORY) + [_rec("lookup_customer", "ALLOW")]
+    params = {"to": "ceo@partner.example.com", "subject": "s", "body": "b"}
+    first = engine.decide(default_pack, "send_email", params, tainted)
+    assert first.decision is Decision.DENY and first.rule_id == "email.deny_exfil_after_read"
+    for _ in range(50):
+        again = engine.decide(default_pack, "send_email", params, tainted)
+        assert again.decision is first.decision
+        assert again.rule_id == first.rule_id

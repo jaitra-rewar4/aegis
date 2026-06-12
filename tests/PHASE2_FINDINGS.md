@@ -113,7 +113,7 @@ All attacks produced the expected decisions.  The enforcement path held on:
 
 ---
 
-## Full Suite Run
+## Full Suite Run (Slice 2a — pre-2b)
 
 Run command: `py -m pytest tests/ -q`
 Result: **270 passed, 0 failed** (pyyaml 6.0.3 / Python 3.11).
@@ -128,3 +128,73 @@ statement (an f-string accidentally treated as a second context manager), which
 raised `TypeError` before `validate()` ran.  After the fix, all 10 reserved-id
 rejections pass against the existing `schema.py` enforcement — reserved-namespace
 enforcement was present in the engine all along; only the test was broken.
+
+---
+
+## Slice 2b — Trajectory Awareness Attack Suite
+
+**File:** `tests/test_trajectory_attacks.py`
+
+### Attack Inventory
+
+| # | Class | What it attacks | Expected decision |
+|---|---|---|---|
+| 1 | `TestFullLoopBeforeAfterPair` | Full four-turn loop run: partner send before read (ALLOW), lookup (ALLOW), SAME partner send after read (DENY), internal send (ALLOW). Spy counts. Denial message names exfil rule. | ALLOW/ALLOW/DENY/ALLOW; spy called exactly once for partner address; is_error denial names `email.deny_exfil_after_read` |
+| 2 | `TestDeniedReadDoesNotTaint` | DENYed lookup_customer (custom pack) → partner send must ALLOW. Ghost-read must not taint. Tests ALLOW-only pinning end-to-end. | lookup DENY/`test.deny_lookup`; send ALLOW/`email.allow_known_domains` |
+| 3a | `TestTrajectoryInjectionViaEvaluateSeam::test_3a_forged_trajectory_fires_exfil_deny` | Forged trajectory handed directly to `evaluate()`. BY DESIGN: evaluate trusts its caller → exfil DENY fires. | DENY/`email.deny_exfil_after_read` (by-design note) |
+| 3b | `TestTrajectoryInjectionViaEvaluateSeam::test_3b_*` | Untaint attempt: call evaluate with None or non-list after a tainted call → 2a behavior. BY DESIGN: loop never does this. | ALLOW/`email.allow_known_domains` (by-design note) |
+| 3c | `TestTrajectoryInjectionViaEvaluateSeam::test_3c_*` | Junk flood (1000 entries) → no crash, same decision as empty trajectory. Plus junk+real-record at end → real record found. | No crash; ALLOW (junk only); DENY (junk+real) |
+| 3d | `TestTrajectoryInjectionViaEvaluateSeam::test_3d_non_string_tool_type_is_not_a_match` | Non-string tool/decision types in record (`list`, `bool`, `int`, `None`) → not-match, no crash. | ALLOW/`email.allow_known_domains` |
+| 3e | `TestTrajectoryInjectionViaEvaluateSeam::test_3e_list_of_lists_trajectory_no_crash_no_match` | Trajectory is a list of lists (not dicts) → no crash, no match. | ALLOW/`email.allow_known_domains` |
+| 4a | `TestDomainNotInEvasionAtLoopLevel::test_4a_double_at_sign_address_denied_by_floor` | Two-@ address after tainted run: malformed → domain_not_in does not hold; domain_in does not hold → floor catches it. | DENY/`policy.default_deny` (floor, NOT exfil rule) |
+| 4b | `TestDomainNotInEvasionAtLoopLevel::test_4b_uppercase_internal_address_allowed_after_taint` | Uppercase internal address `ALICE@INTERNAL.EXAMPLE.COM` after tainted run → case-insensitive match → ALLOW. | ALLOW/`email.allow_known_domains` |
+| 4c | `TestDomainNotInEvasionAtLoopLevel::test_4c_empty_to_address_denied_by_floor` | Empty `to` after tainted run → floor. | DENY/`policy.default_deny` |
+| 4d | `TestDomainNotInEvasionAtLoopLevel::test_4d_malicious_subject_body_*` | Hostile subject/body (DROP TABLE, policy-override text) → identical decision to benign (content never inspected, invariant 1). | Same decision as benign subject/body |
+| 5a | `TestOrderingSelfReference::test_5a_first_action_send_email_*` | First action in the run is a partner send (empty trajectory) → ALLOW. Default pack's exfil DENY sees an empty trajectory. | ALLOW/`email.allow_known_domains` |
+| 5b | `TestOrderingSelfReference::test_5b_strictly_earlier_property_*` | Self-referential pack (send_email after:{tool:send_email}). First send ALLOW (empty trajectory), second send DENY (first send in trajectory). Directly proves the strictly-earlier property. | trail[0] ALLOW/`email.allow_partner`; trail[1] DENY/`email.deny_after_send` |
+| 6a | `TestDeterminismUnderTaintAtLoopLevel::test_two_identical_tainted_runs_*` | Two identical full runs → identical (tool, decision, rule) tuples. | Both trails identical |
+| 6b | `TestDeterminismUnderTaintAtLoopLevel::test_determinism_ten_runs_all_identical` | Ten identical runs → all audit trails identical. | All 10 identical |
+
+### By-Design Findings (not bugs)
+
+**Finding 2b-BD-1: evaluate seam trusts its caller (attack 3a).**
+`gateway.evaluate(tool, params, context)` accepts any list as the trajectory and trusts
+it verbatim. An attacker who can call `evaluate()` directly can forge a trajectory that
+makes the exfil DENY fire (or pass `None` to revert to 2a behavior). This is BY DESIGN
+at the `evaluate` seam: the ADR 0004 §d extraction branch is `isinstance(context, list)`;
+it classifies every input into one of two paths with zero interpretation. The LOOP is the
+trust boundary: `run_loop` owns the trajectory (its own `audit_trail` list), constructs
+it from its own write-ahead audit records, and threads it directly into `evaluate`. No
+outside caller controls the trajectory once the loop is running. The `evaluate` seam is
+an internal function consumed only by `run_loop` in production; its contract is "caller
+must pass a valid trajectory or None." The loop satisfies this contract by construction.
+
+**Finding 2b-BD-2: non-list context silently reverts to 2a behavior (attack 3b).**
+Calling `evaluate()` with `context=None` (or any non-list) after a tainted run produces
+a 2a decision (ALLOW for a partner send). This is BY DESIGN at the `evaluate` seam: the
+extraction branch `trajectory = context if isinstance(context, list) else None` is total
+and intentionally maps all non-list values to the safe (2a) fallback. The loop never
+passes `None` after a run has started — it always threads `audit_trail` (a list, even if
+empty) as the context argument. The fallback is therefore unreachable in normal loop
+operation; it exists to handle the bootstrapping case and to preserve 2a behavior for
+callers that never set up a trajectory. Direct callers who pass `None` deliberately get
+exactly what they ask for: no trajectory awareness. This is not a bug; it is the
+documented totality contract of the extraction seam (ADR 0004 §d).
+
+### run_loop context= parameter: confirmation
+
+The `run_loop` signature in `core/loop.py` has NO `context=` parameter (it was REMOVED
+per ADR 0004 §d review decision). A grep of all test files (`tests/*.py`) and demo files
+(`demos/*.py`) for the pattern `run_loop.*context=` returns zero matches. No existing
+tests pass `context=` to `run_loop`, confirming that the parameter removal is a safe
+change and no existing test depends on the former caller-facing `context` handle.
+
+### Suite Status
+
+Suite NOT run — pending user execution (shell blocked; harness outage noted in task spec).
+
+The suite covers 19 test methods across 6 attack classes. It does not duplicate any case
+from `test_policy_engine.py` (which covers schema rejections, `_after_holds` basics,
+junk-trajectory totality at `decide()`, `domain_not_in` semantics, the engine-level
+proof-of-worth pair, and determinism repeats at `decide()` level). This suite adds the
+loop-level and evaluate-seam adversarial coverage that completes the 2b red-team mandate.
