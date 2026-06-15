@@ -61,3 +61,7 @@ audit_log.db
 .DS_Store
 Thumbs.db
 *.log
+
+# Re-include web/src/lib (the broad lib/ rule above otherwise ignores it)
+!web/src/lib/
+!web/src/lib/**
