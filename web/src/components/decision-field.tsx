@@ -3,16 +3,18 @@
 /**
  * decision-field.tsx — the interactive background, and it IS the product.
  *
- * A live stream of real tool calls flows rightward toward a fixed gate. At the gate each one
- * is judged by the real engine (decide() with the default pack): an ALLOW passes through,
- * tints green, and sails off the right edge; a DENY is stopped dead at the gate, flashes
- * coral, and dissolves. So you watch the gate enforce, with real verdicts.
+ * A live stream of real tool calls flows rightward toward a fixed gate. Two ways an action
+ * gets judged by the real engine (decide() with the default pack):
+ *   - it reaches the gate (ambient), or
+ *   - you sweep your cursor over it (you are a roving inspector).
+ * On judging it POPS: a ring snaps out, it scales, and an ALLOW (green) or DENY (coral) is
+ * stamped. ALLOW keeps flowing and sails off; DENY is caught and dissolves on the spot. The
+ * field also brightens and parts around the moving cursor, and clicking launches a labelled
+ * action from your pointer at the gate.
  *
- * Interaction: the cursor pushes the nearby flow around (a soft repulsor), and clicking
- * launches a labelled action from your pointer straight at the gate. Canvas, DPR-scaled, one
- * rAF loop, transparent so the blueprint grid shows through. Top-weighted mask so it lives in
- * the hero and fades down the page. Fine-pointer only; touch and reduced-motion get the static
- * grid alone.
+ * Canvas, DPR-scaled, one rAF loop, transparent so the blueprint grid shows through.
+ * Top-weighted mask so it lives in the hero. Fine-pointer only; touch and reduced-motion get
+ * the static grid alone.
  */
 
 import { useEffect, useRef } from "react";
@@ -23,11 +25,12 @@ import { defaultPack } from "@/lib/engine/packs/default";
 const DOTS =
   "radial-gradient(circle, rgba(231,239,233,0.08) 1px, transparent 1.5px)";
 const EDGE_FADE = "radial-gradient(120% 85% at 50% 0%, #000 30%, transparent 82%)";
+const TAU = Math.PI * 2;
 
-const ALLOW = "84,198,140"; // --color-allow
-const DENY = "227,106,80"; // --color-deny
-const DIM = "157,180,168"; // --color-paper-dim
-const PAPER = "231,239,233"; // --color-paper
+const ALLOW = "84,198,140";
+const DENY = "227,106,80";
+const DIM = "157,180,168";
+const PAPER = "231,239,233";
 
 type Spec = {
   call: string;
@@ -47,8 +50,6 @@ const SPECS: Spec[] = [
   { call: "lookup_customer(7781)", tool: "lookup_customer", params: { customer_id: "7781" }, traj: [] },
 ];
 
-// Real verdict per spec, computed once. What gets enforced on screen is exactly what the
-// gateway would decide for that action.
 const VERDICTS = SPECS.map((s) => decide(defaultPack, s.tool, s.params, s.traj).decision);
 
 type P = {
@@ -56,11 +57,13 @@ type P = {
   y: number;
   vx: number;
   vy: number;
-  base: number; // base rightward speed
+  base: number;
   spec: number;
   labeled: boolean;
-  state: 0 | 1 | 2; // 0 flow, 1 passed (allow), 2 blocked (deny)
-  t: number; // frames since judged
+  state: 0 | 1 | 2; // 0 flow, 1 allowed, 2 denied
+  t: number;
+  pop: number; // 1 -> 0 snap on judging
+  byCursor: boolean;
 };
 
 export function DecisionField() {
@@ -92,8 +95,8 @@ export function DecisionField() {
       gateX = Math.round(W * 0.6);
     };
 
-    const spawn = (p: P, fromLeft: boolean, i: number) => {
-      p.x = fromLeft ? -40 - Math.random() * 240 : Math.random() * gateX;
+    const spawn = (p: P, i: number) => {
+      p.x = -40 - Math.random() * 260;
       p.y = 40 + Math.random() * (H - 80);
       p.base = 0.42 + Math.random() * 0.4;
       p.vx = p.base;
@@ -102,12 +105,26 @@ export function DecisionField() {
       p.labeled = i < LABELS;
       p.state = 0;
       p.t = 0;
+      p.pop = 0;
+      p.byCursor = false;
+    };
+
+    const judge = (p: P, byCursor: boolean) => {
+      const allow = VERDICTS[p.spec] === "ALLOW";
+      p.state = allow ? 1 : 2;
+      p.t = 0;
+      p.pop = 1;
+      p.byCursor = byCursor;
+      if (!allow) {
+        if (!byCursor) p.x = gateX; // caught at the gate; cursor-caught stays where you got it
+        p.vx = 0;
+      }
     };
 
     const ps: P[] = Array.from({ length: N }, (_, i) => {
-      const p: P = { x: 0, y: 0, vx: 0, vy: 0, base: 0.5, spec: 0, labeled: false, state: 0, t: 0 };
-      spawn(p, false, i);
-      p.x = Math.random() * gateX; // start spread across the field
+      const p: P = { x: 0, y: 0, vx: 0, vy: 0, base: 0.5, spec: 0, labeled: false, state: 0, t: 0, pop: 0, byCursor: false };
+      spawn(p, i);
+      p.x = Math.random() * gateX; // spread across the field on first paint
       return p;
     });
 
@@ -124,18 +141,19 @@ export function DecisionField() {
       my = -9999;
     };
     const onDown = (e: PointerEvent) => {
-      // Launch a labelled action from the pointer straight at the gate.
-      let target = ps.find((p) => p.state !== 0 && p.x > W);
+      let target = ps.find((p) => p.state === 1 && p.x > W);
       if (!target) target = ps[Math.floor(Math.random() * ps.length)];
       target.x = e.clientX;
       target.y = e.clientY;
       target.vx = 3.4;
-      target.vy = (gateX > e.clientX ? 0 : 0) + (Math.random() - 0.5) * 0.3;
+      target.vy = (Math.random() - 0.5) * 0.3;
       target.base = 1.2;
       target.spec = Math.floor(Math.random() * SPECS.length);
       target.labeled = true;
       target.state = 0;
       target.t = 0;
+      target.pop = 0;
+      target.byCursor = true;
     };
 
     const drawGate = () => {
@@ -159,50 +177,43 @@ export function DecisionField() {
       for (let i = 0; i < N; i++) {
         const p = ps[i];
 
-        // cursor repulsion
         const dx = p.x - mx;
         const dy = p.y - my;
         const d2 = dx * dx + dy * dy;
-        if (d2 < 140 * 140) {
+        let near = 0;
+        if (d2 < 160 * 160) {
           const d = Math.sqrt(d2) || 1;
-          const f = (1 - d / 140) * 0.9;
-          p.vx += (dx / d) * f;
-          p.vy += (dy / d) * f;
+          near = 1 - d / 160;
+          if (p.state === 0) {
+            const f = near * 0.9; // part the flow around the cursor
+            p.vx += (dx / d) * f;
+            p.vy += (dy / d) * f;
+          }
         }
 
-        // integrate + ease back to the steady rightward flow
         p.x += p.vx;
         p.y += p.vy;
         p.vx += (p.base - p.vx) * 0.045;
         p.vy *= 0.94;
 
-        // judge at the gate
-        if (p.state === 0 && p.x >= gateX) {
-          const allow = VERDICTS[p.spec] === "ALLOW";
-          p.state = allow ? 1 : 2;
-          p.t = 0;
-          if (!allow) {
-            p.x = gateX;
-            p.vx = 0;
-          }
-        }
+        // judged by a cursor sweep, or by reaching the gate
+        if (p.state === 0 && d2 < 30 * 30) judge(p, true);
+        if (p.state === 0 && p.x >= gateX) judge(p, false);
 
         if (p.state === 2) {
-          // blocked: held at the gate, dissolving
           p.t++;
-          p.x = gateX;
           p.vx = 0;
           p.vy *= 0.8;
-          if (p.t > 64) spawn(p, true, i);
+          if (p.t > 64) spawn(p, i);
         } else if (p.state === 1) {
           p.t++;
-          if (p.x > W + 60) spawn(p, true, i);
+          if (p.x > W + 60) spawn(p, i);
         }
-        if (p.x < -300 || p.y < -80 || p.y > H + 80) spawn(p, true, i);
+        if (p.x < -320 || p.y < -80 || p.y > H + 80) spawn(p, i);
+        p.pop *= 0.88;
 
-        // draw
         let color = DIM;
-        let alpha = 0.5;
+        let alpha = 0.42 + near * 0.45;
         let r = 1.7;
         if (p.state === 1) {
           color = ALLOW;
@@ -212,10 +223,10 @@ export function DecisionField() {
           color = DENY;
           const k = Math.max(0, 1 - p.t / 64);
           alpha = 0.9 * k;
-          r = 2 + (1 - k) * 4; // expands as it dissolves
+          r = 2 + (1 - k) * 4;
         }
+        const scale = 1 + p.pop * 0.7;
 
-        // motion streak
         ctx.strokeStyle = `rgba(${color},${alpha * 0.4})`;
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -225,30 +236,31 @@ export function DecisionField() {
 
         ctx.beginPath();
         ctx.fillStyle = `rgba(${color},${alpha})`;
-        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, r * scale, 0, TAU);
         ctx.fill();
 
-        if (p.state === 2) {
-          // a rejecting ring at the gate
-          ctx.strokeStyle = `rgba(${DENY},${alpha * 0.7})`;
-          ctx.lineWidth = 1;
+        // the pop: a ring that snaps outward on judging
+        if (p.pop > 0.04) {
+          ctx.strokeStyle = `rgba(${color},${p.pop * 0.7})`;
+          ctx.lineWidth = 1.4;
           ctx.beginPath();
-          ctx.arc(p.x, p.y, r + 2, 0, Math.PI * 2);
+          ctx.arc(p.x, p.y, r * scale + (1 - p.pop) * 16, 0, TAU);
           ctx.stroke();
         }
 
+        // your cursor-judged actions stamp their verdict; ambient gate judging stays quiet
+        if (p.byCursor && p.pop > 0.04) {
+          ctx.font = "600 11px ui-monospace, SFMono-Regular, monospace";
+          ctx.fillStyle = `rgba(${color},${Math.min(1, p.pop * 1.3)})`;
+          ctx.fillText(p.state === 1 ? "ALLOW" : "DENY", p.x + 10, p.y - 9 - (1 - p.pop) * 8);
+        }
+
         if (p.labeled) {
-          const lblAlpha = p.state === 0 ? 0.32 : alpha;
-          const lblColor = p.state === 0 ? DIM : color;
+          const a = p.state === 0 ? 0.3 + near * 0.4 : alpha;
+          const c = p.state === 0 ? DIM : color;
           ctx.font = "11px ui-monospace, SFMono-Regular, monospace";
-          ctx.fillStyle = `rgba(${lblColor},${lblAlpha})`;
+          ctx.fillStyle = `rgba(${c},${a})`;
           ctx.fillText(SPECS[p.spec].call, p.x + 7, p.y);
-          if (p.state !== 0) {
-            ctx.font = "600 10px ui-monospace, SFMono-Regular, monospace";
-            ctx.fillStyle = `rgba(${color},${alpha})`;
-            const w = ctx.measureText(SPECS[p.spec].call).width;
-            ctx.fillText(p.state === 1 ? "ALLOW" : "DENY", p.x + 14 + w, p.y);
-          }
         }
       }
 
