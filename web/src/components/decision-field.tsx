@@ -50,7 +50,7 @@ const SPECS: Spec[] = [
   { call: "lookup_customer(7781)", tool: "lookup_customer", params: { customer_id: "7781" }, traj: [] },
 ];
 
-const VERDICTS = SPECS.map((s) => decide(defaultPack, s.tool, s.params, s.traj).decision);
+const RESULTS = SPECS.map((s) => decide(defaultPack, s.tool, s.params, s.traj));
 
 type P = {
   x: number;
@@ -109,15 +109,30 @@ export function DecisionField() {
       p.byCursor = false;
     };
 
+    let lastEmit = 0;
     const judge = (p: P, byCursor: boolean) => {
-      const allow = VERDICTS[p.spec] === "ALLOW";
+      const res = RESULTS[p.spec];
+      const allow = res.decision === "ALLOW";
       p.state = allow ? 1 : 2;
       p.t = 0;
       p.pop = 1;
-      p.byCursor = byCursor;
+      if (byCursor) p.byCursor = true;
       if (!allow) {
         if (!byCursor) p.x = gateX; // caught at the gate; cursor-caught stays where you got it
         p.vx = 0;
+      }
+      // actions you judge yourself (a cursor sweep or a click-launch) record into the live
+      // audit log in the hero; ambient gate judgings stay quiet.
+      if (byCursor || p.byCursor) {
+        const now = performance.now();
+        if (now - lastEmit > 140) {
+          lastEmit = now;
+          window.dispatchEvent(
+            new CustomEvent("aegis:verdict", {
+              detail: { call: SPECS[p.spec].call, decision: res.decision, rule: res.ruleId },
+            }),
+          );
+        }
       }
     };
 
