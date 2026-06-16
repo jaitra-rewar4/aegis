@@ -8,6 +8,7 @@
  */
 
 import { useLenis } from "lenis/react";
+import { Logo } from "@/components/logo";
 
 const REPO_URL = "https://github.com/jaitra-rewar4/aegis";
 
@@ -21,9 +22,10 @@ export function TopNav() {
     <header className="relative z-40 mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
       <a
         href="/"
-        className="font-display text-lg font-bold tracking-tight text-paper"
+        aria-label="Aegis home"
+        className="rounded text-paper focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-paper focus-visible:ring-offset-4 focus-visible:ring-offset-ink"
       >
-        Aegis
+        <Logo />
       </a>
       <nav className="flex items-center gap-6 font-mono text-[12px] uppercase tracking-[0.14em] text-paper-dim">
         <a

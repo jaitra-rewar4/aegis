@@ -3,6 +3,8 @@
  * than a hard cut to bare ink. Hairline-topped, mono, quiet.
  */
 
+import { LogoMark } from "@/components/logo";
+
 const REPO_URL = "https://github.com/jaitra-rewar4/aegis";
 
 const link =
@@ -12,8 +14,9 @@ export function Footer() {
   return (
     <footer className="relative border-t border-line">
       <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-12 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-baseline gap-3">
-          <span className="font-display text-base font-bold tracking-tight text-paper">
+        <div className="flex items-center gap-3 text-paper">
+          <LogoMark className="size-5" />
+          <span className="font-display text-base font-bold tracking-tight">
             Aegis
           </span>
           <span className="font-mono text-[11px] text-paper-dim">
