@@ -145,6 +145,10 @@ export function DecisionField() {
 
     let mx = -9999;
     let my = -9999;
+    let pmx = mx;
+    let pmy = my;
+    const R = 190;
+    const R2 = R * R;
     let raf = 0;
 
     const onMove = (e: PointerEvent) => {
@@ -189,6 +193,12 @@ export function DecisionField() {
       drawGate();
       ctx.textBaseline = "middle";
 
+      // cursor velocity this frame (clamped), so dragging fast pulls the stream along
+      const mvx = Math.max(-60, Math.min(60, mx - pmx));
+      const mvy = Math.max(-60, Math.min(60, my - pmy));
+      pmx = mx;
+      pmy = my;
+
       for (let i = 0; i < N; i++) {
         const p = ps[i];
 
@@ -196,13 +206,16 @@ export function DecisionField() {
         const dy = p.y - my;
         const d2 = dx * dx + dy * dy;
         let near = 0;
-        if (d2 < 160 * 160) {
+        if (d2 < R2) {
           const d = Math.sqrt(d2) || 1;
-          near = 1 - d / 160;
+          near = 1 - d / R;
           if (p.state === 0) {
-            const f = near * 0.9; // part the flow around the cursor
-            p.vx += (dx / d) * f;
-            p.vy += (dy / d) * f;
+            const nx = dx / d;
+            const ny = dy / d;
+            // stir the stream: a soft push out, a swirl around the cursor, and a drag along
+            // the cursor's motion so moving fast pulls the flow with you.
+            p.vx += nx * 0.22 * near - ny * 0.85 * near + mvx * 0.16 * near;
+            p.vy += ny * 0.22 * near + nx * 0.85 * near + mvy * 0.16 * near;
           }
         }
 
@@ -228,7 +241,7 @@ export function DecisionField() {
         p.pop *= 0.88;
 
         let color = DIM;
-        let alpha = 0.42 + near * 0.45;
+        let alpha = 0.4 + near * 0.55;
         let r = 1.7;
         if (p.state === 1) {
           color = ALLOW;

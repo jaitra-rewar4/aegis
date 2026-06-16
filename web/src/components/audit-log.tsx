@@ -1,11 +1,12 @@
 "use client";
 
 /**
- * audit-log.tsx — a live decision record. It streams the canonical sequence in once (the
- * line-2-vs-line-6 send_email flip story), then LISTENS for `aegis:verdict` events that the
+ * audit-log.tsx — a live decision record, rendered as a bare minimal feed (no card chrome).
+ *
+ * It streams the canonical sequence in once, then listens for `aegis:verdict` events that the
  * background gate dispatches whenever you judge an action yourself (sweep or click). Those
- * append in real time, highlighted, capped to the most recent rows. Every verdict, seed or
- * live, is real decide() output.
+ * append in real time, marked and brightened, capped to the most recent rows. Every verdict,
+ * seed or live, is real decide() output.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -68,8 +69,8 @@ function Verdict({
       initial={reduce ? false : { scale: 0.8, opacity: 0 }}
       animate={reduce ? { opacity: 1 } : { scale: 1, opacity: 1 }}
       transition={{ delay: reduce ? 0 : 0.16, duration: reduce ? 0 : 0.22, ease: EASE }}
-      className={`inline-flex shrink-0 items-center gap-2 rounded-md px-2.5 py-1 font-mono text-[11px] font-medium tracking-wide ${
-        allow ? "bg-allow-soft text-allow" : "bg-deny-soft text-deny"
+      className={`inline-flex shrink-0 items-center gap-2 font-mono text-[11px] font-medium tracking-wide ${
+        allow ? "text-allow" : "text-deny"
       }`}
     >
       <span className={`size-1.5 rounded-full ${allow ? "bg-allow" : "bg-deny"}`} aria-hidden />
@@ -123,23 +124,17 @@ export function AuditLog({ className }: { className?: string }) {
   }, []);
 
   return (
-    <div
-      className={`overflow-hidden rounded-xl border border-line-strong bg-ink-raised ${className ?? ""}`}
-    >
-      <div className="flex items-center gap-2 border-b border-line px-4 py-3">
-        <span className="size-2 rounded-full bg-paper-dim/40" aria-hidden />
-        <span className="size-2 rounded-full bg-paper-dim/40" aria-hidden />
-        <span className="size-2 rounded-full bg-paper-dim/40" aria-hidden />
-        <span className="ml-2 font-mono text-[11px] uppercase tracking-[0.18em] text-paper-dim">
+    <div className={className}>
+      <div className="flex items-center gap-2 border-b border-line pb-2.5">
+        <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-paper-dim">
           decision record
         </span>
-        <span className="ml-auto inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-paper-dim/70">
-          <span className="size-1.5 rounded-full bg-allow/80" aria-hidden />
+        <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.16em] text-paper-dim/60">
           append-only
         </span>
       </div>
 
-      <ul className="flex min-h-[19rem] flex-col gap-2 p-4">
+      <ul className="flex min-h-[17rem] flex-col">
         <AnimatePresence mode="popLayout" initial={false}>
           {rows.map((row) => (
             <motion.li
@@ -149,14 +144,14 @@ export function AuditLog({ className }: { className?: string }) {
               animate={{ opacity: 1, y: 0 }}
               exit={reduce ? { opacity: 0 } : { opacity: 0, y: -6 }}
               transition={{ duration: 0.34, ease: EASE }}
-              className={`flex flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-lg border px-3 py-2.5 ${
-                row.live
-                  ? "border-paper/25 bg-ink-high/70"
-                  : "border-line/60 bg-ink-high/40"
-              }`}
+              className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5 border-b border-line/50 py-2.5"
             >
-              <code className="min-w-0 break-all font-mono text-[12.5px] leading-relaxed text-paper">
-                {row.live ? "› " : ""}
+              <code
+                className={`min-w-0 break-all font-mono text-[12.5px] leading-relaxed ${
+                  row.live ? "text-paper" : "text-paper-dim"
+                }`}
+              >
+                {row.live && <span className="text-paper-dim/70">› </span>}
                 {row.call}
               </code>
               <Verdict decision={row.decision} reason={row.reason} reduce={reduce} />

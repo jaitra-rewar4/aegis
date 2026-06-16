@@ -1,23 +1,17 @@
 "use client";
 
 /**
- * hero.tsx — the first screen is a live, operable decision gate.
+ * hero.tsx — minimalist, and the first screen is a live, operable decision gate.
  *
- * The background field (decision-field) is the gate: real tool calls stream through it and get
- * judged. This hero puts a banner headline over it and, below, a LIVE decision record. The
- * record streams the canonical story, and then every action you catch by sweeping or clicking
- * the field appends to it in real time. You operate a real deterministic gate and watch it
- * write its own append-only audit log.
- *
- * The headline does a per-word mask reveal on load; the rest staggers in. The primary CTA is
- * magnetic. prefers-reduced-motion: words render in place, fades inert, magnet off (and the
- * field stops, so the log just shows its seeded sequence).
+ * The background field (decision-field) is the gate: real tool calls stream through it, you
+ * stir the flow with your cursor, and judging an action (sweep or click) appends it to the
+ * live decision record below the headline. Spare type, quiet links, no marketing buttons; the
+ * interaction carries it. Headline does a per-word mask reveal on load; the rest staggers in.
  */
 
 import { Fragment } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { AuditLog } from "@/components/audit-log";
-import { useMagnetic } from "@/lib/use-magnetic";
 import { EASE } from "@/lib/motion";
 
 const REPO_URL = "https://github.com/jaitra-rewar4/aegis";
@@ -38,7 +32,6 @@ const HEADLINE: { t: string; dim?: boolean }[] = [
 
 export function Hero() {
   const reduce = useReducedMotion();
-  const magnet = useMagnetic<HTMLAnchorElement>(0.4);
 
   const fade = (delay: number) =>
     reduce
@@ -80,35 +73,42 @@ export function Hero() {
         className="mt-6 max-w-xl text-[15px] leading-relaxed text-paper-dim sm:text-base"
       >
         A deterministic gate at the tool-call boundary. Every action is allowed or denied on its
-        parameters and the sequence before it, then written to an audit trail you can replay. No
-        model sits in the decision path.
+        parameters and the sequence before it, then written to a record you can replay.
       </motion.p>
 
-      <motion.div {...fade(0.74)} className="mt-10 w-full max-w-5xl">
+      <motion.div {...fade(0.74)} className="mt-12 w-full max-w-4xl">
         <AuditLog />
         <p className="mt-3 font-mono text-[11.5px] leading-relaxed text-paper-dim">
-          Live, from <span className="text-paper">decide()</span>. Sweep your cursor through the
-          field behind this, or click it, to judge actions yourself. Every verdict you catch
-          appends here.
+          Stir the field with your cursor. Sweep over an action, or click, to judge it. Every
+          verdict you catch appends here, live from <span className="text-paper">decide()</span>.
         </p>
       </motion.div>
 
-      <motion.div {...fade(0.84)} className="mt-9 flex flex-wrap items-center gap-3">
-        <motion.a
-          ref={magnet.ref}
-          onMouseMove={magnet.onMouseMove}
-          onMouseLeave={magnet.onMouseLeave}
-          style={{ x: magnet.x, y: magnet.y }}
+      <motion.div
+        {...fade(0.84)}
+        className="mt-10 flex flex-wrap items-center gap-x-7 gap-y-3 font-mono text-[12px] uppercase tracking-[0.16em]"
+      >
+        <a
           href="/playground"
-          className="inline-flex items-center gap-2 rounded-lg bg-paper px-5 py-3 text-sm font-semibold text-ink transition-colors hover:bg-paper/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-paper focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+          className="group inline-flex items-center gap-2 text-paper transition-colors"
         >
-          Open the playground →
-        </motion.a>
+          <span className="border-b border-paper/30 pb-0.5 transition-colors group-hover:border-paper">
+            Playground
+          </span>
+          <span aria-hidden className="text-paper-dim transition-transform group-hover:translate-x-0.5">
+            ↗
+          </span>
+        </a>
         <a
           href={REPO_URL}
-          className="inline-flex items-center gap-2 rounded-lg border border-line-strong px-5 py-3 text-sm font-medium text-paper transition hover:bg-ink-high focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-paper focus-visible:ring-offset-2 focus-visible:ring-offset-ink"
+          target="_blank"
+          rel="noreferrer"
+          className="group inline-flex items-center gap-2 text-paper-dim transition-colors hover:text-paper"
         >
-          View the source
+          <span className="border-b border-transparent pb-0.5 transition-colors group-hover:border-paper">
+            Source
+          </span>
+          <span aria-hidden>↗</span>
         </a>
       </motion.div>
     </section>
