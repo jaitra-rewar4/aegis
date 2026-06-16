@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Archivo, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { SmoothScroll } from "@/components/smooth-scroll";
-import { CursorField } from "@/components/cursor-field";
+import { DecisionField } from "@/components/decision-field";
 import { ScrollRail } from "@/components/scroll-rail";
 import { Footer } from "@/components/footer";
 
@@ -41,7 +41,7 @@ export default function RootLayout({
       className={`${display.variable} ${sans.variable} ${mono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <CursorField />
+        <DecisionField />
         <SmoothScroll>
           {children}
           <Footer />
