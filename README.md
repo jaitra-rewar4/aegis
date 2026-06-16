@@ -2,6 +2,8 @@
 
 A deterministic, action-layer policy gateway for AI agents.
 
+Live demo: [aegis-policy.vercel.app](https://aegis-policy.vercel.app)
+
 Aegis sits at the tool-call boundary of an AI agent. For every action the agent proposes (a tool plus its concrete parameters), Aegis checks it against declarative least-privilege policies and returns one of four decisions, then writes the action, the decision, the rule that fired, and the approver to an append-only audit trail.
 
 | Decision | Meaning |
