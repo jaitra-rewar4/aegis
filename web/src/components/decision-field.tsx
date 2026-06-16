@@ -1,17 +1,18 @@
 "use client";
 
 /**
- * decision-field.tsx — the interactive background, and it IS the product.
+ * decision-field.tsx — the interactive background, and it IS the product: your cursor is the gate.
  *
- * Real tool-call tokens drift slowly across the page over the blueprint grid. At rest they
- * are dim and monochrome. As the cursor sweeps near one, it brightens and reveals its verdict
- * straight from decide() with the default pack: green ALLOW or coral DENY. So the only colour
- * in the background is a real gate verdict, and moving the cursor "inspects" the actions
- * flowing through the gate. A soft scan light follows the cursor underneath it all.
+ * Real tool-call tokens drift across the blueprint grid. A vertical gate line tracks the
+ * cursor, and the instant a token passes THROUGH the gate it is judged by the real engine
+ * (decide() with the default pack): it flashes, stamps its verdict (green ALLOW / coral DENY),
+ * then settles back to dim and drifts on. Hold the cursor still and the stream flows through
+ * and gets judged; sweep it and you actively run actions through the gate. The only colour in
+ * the background is a real gate verdict.
  *
- * Everything animates via transform/opacity in one rAF loop driven by refs (no React state
- * per frame), so it stays smooth. Fine-pointer only; on touch or reduced-motion the tokens
- * never activate and only the static grid shows.
+ * One rAF loop, transform/opacity only, driven by refs (no React state per frame), so it is
+ * smooth. Fine-pointer only; on touch or reduced-motion the tokens never activate and only the
+ * static grid shows.
  */
 
 import { useEffect, useRef } from "react";
@@ -30,8 +31,6 @@ type Spec = {
   traj: { tool: string; decision: string }[];
 };
 
-// Each token is a real call; its verdict is computed once from the real engine, so what you
-// see judged on screen is exactly what the gateway would decide for that action.
 const SPECS: Spec[] = [
   { call: "lookup_customer(4012)", tool: "lookup_customer", params: { customer_id: "4012" }, traj: [] },
   { call: 'calculator("0.0825 * 2400")', tool: "calculator", params: { expression: "0.0825 * 2400" }, traj: [] },
@@ -43,6 +42,8 @@ const SPECS: Spec[] = [
   { call: "lookup_customer(7781)", tool: "lookup_customer", params: { customer_id: "7781" }, traj: [] },
 ];
 
+// Each token's verdict is the real engine's, computed once, so what gets stamped on screen is
+// exactly what the gateway would decide for that action.
 const TOKENS = SPECS.map((s) => ({
   call: s.call,
   decision: decide(defaultPack, s.tool, s.params, s.traj).decision,
@@ -50,7 +51,7 @@ const TOKENS = SPECS.map((s) => ({
 
 export function DecisionField() {
   const reduce = useReducedMotion();
-  const lightRef = useRef<HTMLDivElement>(null);
+  const gateRef = useRef<HTMLDivElement>(null);
   const tokenRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   useEffect(() => {
@@ -58,18 +59,21 @@ export function DecisionField() {
 
     let W = window.innerWidth;
     let H = window.innerHeight;
-    const REVEAL = 150;
-    const light = lightRef.current;
+    const gate = gateRef.current;
 
-    const T = TOKENS.map(() => ({
-      x: Math.random() * W,
-      y: 70 + Math.random() * Math.max(120, H - 140),
-      vx: 22 + Math.random() * 26, // px per second, gentle rightward drift
-      vy: (Math.random() - 0.5) * 10,
-      op: 0,
-    }));
-    let px = W / 2;
-    let py = H / 2;
+    const T = TOKENS.map(() => {
+      const x = Math.random() * W;
+      return {
+        x,
+        prev: x,
+        y: 70 + Math.random() * Math.max(120, H - 150),
+        vx: 24 + Math.random() * 26, // gentle rightward drift, px/sec
+        vy: (Math.random() - 0.5) * 8,
+        op: 0,
+        flash: 0,
+      };
+    });
+    let px = W * 0.5;
     let raf = 0;
     let last = performance.now();
 
@@ -77,34 +81,38 @@ export function DecisionField() {
       const dt = Math.min(0.05, (now - last) / 1000);
       last = now;
 
-      if (light) light.style.transform = `translate3d(${px - 350}px, ${py - 350}px, 0)`;
+      if (gate) gate.style.transform = `translate3d(${px}px, 0, 0)`;
 
       for (let i = 0; i < T.length; i++) {
         const el = tokenRefs.current[i];
         if (!el) continue;
         const t = T[i];
 
+        t.prev = t.x;
         t.x += t.vx * dt;
         t.y += t.vy * dt;
         if (t.x > W + 160) {
-          t.x = -240;
-          t.y = 70 + Math.random() * Math.max(120, H - 140);
+          t.x = -260;
+          t.prev = t.x;
+          t.y = 70 + Math.random() * Math.max(120, H - 150);
         }
         if (t.y < 60 || t.y > H - 40) {
           t.vy = -t.vy;
           t.y = Math.max(60, Math.min(H - 40, t.y));
         }
 
-        const dx = t.x - px;
-        const dy = t.y - py;
-        const near = dx * dx + dy * dy < REVEAL * REVEAL;
-        const target = near ? 0.78 : 0.14;
-        t.op += (target - t.op) * 0.12;
+        // Crossed the gate this frame? (sign of x - gateX flipped)
+        if ((t.prev - px) * (t.x - px) < 0) t.flash = 1;
+        t.flash *= 0.978;
 
-        el.style.transform = `translate3d(${t.x}px, ${t.y}px, 0)`;
+        const nearGate = Math.max(0, 1 - Math.abs(t.x - px) / 220);
+        const target = 0.13 + 0.6 * t.flash + 0.15 * nearGate;
+        t.op += (target - t.op) * 0.14;
+
+        el.style.transform = `translate3d(${t.x}px, ${t.y}px, 0) scale(${1 + 0.07 * t.flash})`;
         el.style.opacity = String(t.op);
         const tag = el.querySelector<HTMLElement>("[data-v]");
-        if (tag) tag.style.opacity = near ? "1" : "0";
+        if (tag) tag.style.opacity = String(Math.min(1, t.flash * 1.4));
       }
 
       raf = requestAnimationFrame(frame);
@@ -112,14 +120,13 @@ export function DecisionField() {
 
     const onMove = (e: PointerEvent) => {
       px = e.clientX;
-      py = e.clientY;
     };
     const onResize = () => {
       W = window.innerWidth;
       H = window.innerHeight;
     };
 
-    if (light) light.style.opacity = "1";
+    if (gate) gate.style.opacity = "1";
     window.addEventListener("pointermove", onMove, { passive: true });
     window.addEventListener("resize", onResize, { passive: true });
     raf = requestAnimationFrame(frame);
@@ -148,12 +155,12 @@ export function DecisionField() {
           ref={(el) => {
             tokenRefs.current[i] = el;
           }}
-          className="absolute left-0 top-0 flex items-center gap-2 whitespace-nowrap font-mono text-[11px] opacity-0 will-change-transform"
+          className="absolute left-0 top-0 flex origin-left items-center gap-2 whitespace-nowrap font-mono text-[11px] opacity-0 will-change-transform"
         >
           <span className="text-paper-dim">{t.call}</span>
           <span
             data-v
-            className={`text-[10px] font-semibold uppercase tracking-wide opacity-0 transition-opacity duration-300 ${
+            className={`text-[10px] font-semibold uppercase tracking-wide opacity-0 ${
               t.decision === "ALLOW" ? "text-allow" : "text-deny"
             }`}
           >
@@ -162,15 +169,26 @@ export function DecisionField() {
         </div>
       ))}
 
+      {/* The gate: a vertical line that tracks the cursor and judges what passes through it. */}
       <div
-        ref={lightRef}
-        className="absolute left-0 top-0 size-[700px] opacity-0 transition-opacity duration-700 will-change-transform"
+        ref={gateRef}
+        className="absolute inset-y-0 left-0 w-px opacity-0 transition-opacity duration-700 will-change-transform"
         style={{
           background:
-            "radial-gradient(circle, rgba(231,239,233,0.14), transparent 55%)",
-          mixBlendMode: "screen",
+            "linear-gradient(to bottom, transparent, rgba(231,239,233,0.22) 16%, rgba(231,239,233,0.22) 84%, transparent)",
         }}
-      />
+      >
+        <div
+          className="absolute inset-y-0 -left-5 w-10"
+          style={{
+            background:
+              "linear-gradient(to right, transparent, rgba(231,239,233,0.035), transparent)",
+          }}
+        />
+        <span className="absolute left-2 top-28 font-mono text-[9px] uppercase tracking-[0.22em] text-paper-dim/70">
+          gate
+        </span>
+      </div>
     </div>
   );
 }
