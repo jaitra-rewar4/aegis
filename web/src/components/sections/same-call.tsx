@@ -17,6 +17,7 @@ import { decide } from "@/lib/engine/engine";
 import { defaultPack } from "@/lib/engine/packs/default";
 import { Reveal } from "@/components/reveal";
 import { EASE } from "@/lib/motion";
+import { Section } from "@/components/section";
 
 const CALL_TOOL = "send_email";
 const CALL_PARAMS = { to: "ops@partner.example.com", subject: "Q3 figures" };
@@ -40,12 +41,9 @@ export function SameCall() {
   const allow = result.decision === "ALLOW";
 
   return (
-    <section className="relative mx-auto max-w-6xl px-6 py-24 sm:py-32">
+    <Section index="03" label="Same call, two verdicts">
       <Reveal className="max-w-2xl">
-        <p className="font-mono text-[12px] uppercase tracking-[0.2em] text-paper-dim">
-          The same call, two verdicts
-        </p>
-        <h2 className="mt-4 font-display text-3xl font-bold tracking-[-0.02em] text-paper sm:text-4xl">
+        <h2 className="font-display text-3xl font-bold tracking-[-0.02em] text-paper sm:text-4xl">
           The call doesn’t change. The history does.
         </h2>
         <p className="mt-5 text-[15px] leading-relaxed text-paper-dim sm:text-base">
@@ -56,7 +54,7 @@ export function SameCall() {
       </Reveal>
 
       <Reveal className="mt-12" delay={0.05}>
-        <div className="overflow-hidden rounded-2xl border border-line bg-ink-raised shadow-2xl shadow-black/40">
+        <div className="overflow-hidden rounded-2xl border border-line-strong bg-ink-raised">
           {/* The call under test */}
           <div className="border-b border-line px-5 py-4 sm:px-7">
             <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-paper-dim">
@@ -105,13 +103,19 @@ export function SameCall() {
 
             {/* The live verdict */}
             <div className="flex flex-col items-start gap-3 sm:items-end">
-              <AnimatePresence mode="wait" initial={false}>
+              <AnimatePresence mode="popLayout" initial={false}>
                 <motion.div
                   key={result.decision}
-                  initial={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.92 }}
-                  animate={reduce ? { opacity: 1 } : { opacity: 1, scale: 1 }}
+                  initial={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.9 }}
+                  animate={
+                    reduce ? { opacity: 1 } : { opacity: 1, scale: [0.9, 1.05, 1] }
+                  }
                   exit={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.98 }}
-                  transition={{ duration: 0.28, ease: EASE }}
+                  transition={{
+                    duration: reduce ? 0 : 0.34,
+                    ease: EASE,
+                    times: [0, 0.65, 1],
+                  }}
                   className={`inline-flex items-center gap-2.5 rounded-lg px-4 py-2.5 font-mono text-sm font-semibold tracking-wide ${
                     allow ? "bg-allow-soft text-allow" : "bg-deny-soft text-deny"
                   }`}
@@ -150,6 +154,6 @@ export function SameCall() {
           gateway runs. No model in the loop; flip it as many times as you like.
         </p>
       </Reveal>
-    </section>
+    </Section>
   );
 }

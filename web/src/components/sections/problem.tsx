@@ -1,16 +1,14 @@
 /**
- * Problem — "Action-layer blindness."
+ * §01 Problem — "Action-layer blindness."
  *
- * Two side-by-side mono cards. LEFT: the agent's words, which a text filter waves through
- * (a green ✓ — a TEXT-filter pass, not an Aegis verdict). RIGHT: the action those words
- * actually emit — a send_email to an outside domain carrying records read this run (a coral
- * ✕ marking the danger). No ALLOW/DENY label appears here: the Aegis verdict is the next
- * section's job; this one just shows the gap between saying and doing.
- *
- * Server component: copy + <Reveal> wrappers (client leaves). The ✓/✕ are the only colour
- * on the section, and they carry meaning (pass / dangerous) — per the colour-as-meaning rule.
+ * Two mono cards in the section's content column. LEFT: the agent's words, which a text
+ * filter waves through (green ✓ — a TEXT-filter pass, not an Aegis verdict). RIGHT: the
+ * action those words emit — a send_email to an outside domain carrying records read this run
+ * (coral ✕). No ALLOW/DENY label here; the Aegis verdict is §03's job. The ✓/✕ are the only
+ * colour, and they carry meaning (pass / dangerous).
  */
 
+import { Section } from "@/components/section";
 import { Reveal, RevealGroup, RevealItem } from "@/components/reveal";
 
 function Check() {
@@ -44,15 +42,9 @@ function Cross() {
 
 export function Problem() {
   return (
-    <section
-      id="problem"
-      className="relative mx-auto max-w-6xl px-6 py-24 sm:py-32"
-    >
+    <Section index="01" label="The problem" id="problem">
       <Reveal className="max-w-2xl">
-        <p className="font-mono text-[12px] uppercase tracking-[0.2em] text-paper-dim">
-          The problem
-        </p>
-        <h2 className="mt-4 font-display text-3xl font-bold tracking-[-0.02em] text-paper sm:text-4xl">
+        <h2 className="font-display text-3xl font-bold tracking-[-0.02em] text-paper sm:text-4xl">
           Action-layer blindness.
         </h2>
         <p className="mt-5 text-[15px] leading-relaxed text-paper-dim sm:text-base">
@@ -62,8 +54,7 @@ export function Problem() {
         </p>
       </Reveal>
 
-      <RevealGroup className="mt-12 grid items-stretch gap-4 sm:mt-14 sm:grid-cols-2">
-        {/* LEFT — what the text filter sees */}
+      <RevealGroup className="mt-10 grid items-stretch gap-4 sm:grid-cols-2">
         <RevealItem className="h-full">
           <div className="flex h-full flex-col rounded-xl border border-line bg-ink-raised p-5">
             <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-paper-dim">
@@ -79,7 +70,6 @@ export function Problem() {
           </div>
         </RevealItem>
 
-        {/* RIGHT — what actually executes */}
         <RevealItem className="h-full">
           <div className="flex h-full flex-col rounded-xl border border-line bg-ink-raised p-5">
             <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-paper-dim">
@@ -108,6 +98,6 @@ export function Problem() {
           The words were fine. The action wasn’t.
         </p>
       </Reveal>
-    </section>
+    </Section>
   );
 }

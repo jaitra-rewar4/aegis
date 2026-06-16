@@ -103,8 +103,13 @@ function Verdict({
       // entrance runs ~0.34s; this waits, then pops). Rows appear one at a time, so the
       // stamps read as sequenced down the stream. Reduced motion -> plain appearance.
       initial={reduce ? false : { scale: 0.8, opacity: 0 }}
-      animate={reduce ? { opacity: 1 } : { scale: 1, opacity: 1 }}
-      transition={{ delay: reduce ? 0 : 0.26, duration: reduce ? 0 : 0.22, ease: EASE }}
+      animate={reduce ? { opacity: 1 } : { scale: [0.8, 1.06, 1], opacity: 1 }}
+      transition={{
+        delay: reduce ? 0 : 0.26,
+        duration: reduce ? 0 : 0.34,
+        ease: EASE,
+        times: [0, 0.7, 1],
+      }}
       className={`inline-flex shrink-0 items-center gap-2 rounded-md px-2.5 py-1 font-mono text-[11px] font-medium tracking-wide ${
         allow ? "bg-allow-soft text-allow" : "bg-deny-soft text-deny"
       }`}
@@ -123,12 +128,13 @@ export function VerdictStream() {
   const reduce = useReducedMotion();
   const [count, setCount] = useState(0);
 
+  // Stream the rows in once, then HOLD the full list. We deliberately do not loop back to an
+  // empty panel — the old reset blanked the hero's strongest element for ~3s every cycle. The
+  // point (line 2 vs line 6 flipping on the same send_email) only reads once every row is
+  // present, so a stable, full panel is both calmer and clearer.
   useEffect(() => {
-    if (count < ROWS.length) {
-      const t = setTimeout(() => setCount((c) => c + 1), 950);
-      return () => clearTimeout(t);
-    }
-    const t = setTimeout(() => setCount(0), 2800);
+    if (count >= ROWS.length) return;
+    const t = setTimeout(() => setCount((c) => c + 1), 850);
     return () => clearTimeout(t);
   }, [count]);
 

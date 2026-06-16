@@ -2,6 +2,9 @@ import type { Metadata } from "next";
 import { Archivo, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { SmoothScroll } from "@/components/smooth-scroll";
+import { CursorField } from "@/components/cursor-field";
+import { ScrollRail } from "@/components/scroll-rail";
+import { Footer } from "@/components/footer";
 
 const display = Archivo({
   variable: "--font-display",
@@ -38,7 +41,12 @@ export default function RootLayout({
       className={`${display.variable} ${sans.variable} ${mono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <SmoothScroll>{children}</SmoothScroll>
+        <CursorField />
+        <SmoothScroll>
+          {children}
+          <Footer />
+        </SmoothScroll>
+        <ScrollRail />
       </body>
     </html>
   );

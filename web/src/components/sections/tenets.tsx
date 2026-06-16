@@ -1,14 +1,11 @@
-"use client";
-
 /**
- * Three tenets — cards that lift slightly on hover. RevealGroup staggers them in; each card
- * is a motion element with a small hover lift. prefers-reduced-motion: no lift, no reveal
- * transform (RevealItem degrades; the hover is gated on `reduce`).
+ * §04 Principles — the three properties, as a numbered editorial list (hanging mono numbers,
+ * hairline rules between rows), not a 3-card hover grid. The list form reads as a spec sheet,
+ * which fits the instrument concept far better than floating cards. Server component.
  */
 
-import { motion, useReducedMotion } from "framer-motion";
-import { RevealGroup, RevealItem } from "@/components/reveal";
-import { EASE } from "@/lib/motion";
+import { Section } from "@/components/section";
+import { Reveal, RevealGroup, RevealItem } from "@/components/reveal";
 
 const TENETS = [
   {
@@ -26,31 +23,37 @@ const TENETS = [
 ];
 
 export function Tenets() {
-  const reduce = useReducedMotion();
-
   return (
-    <section className="relative mx-auto max-w-6xl px-6 py-24 sm:py-32">
-      <RevealGroup className="grid gap-4 sm:grid-cols-3">
+    <Section index="04" label="Principles">
+      <Reveal className="max-w-2xl">
+        <h2 className="font-display text-3xl font-bold tracking-[-0.02em] text-paper sm:text-4xl">
+          Three properties, no exceptions.
+        </h2>
+        <p className="mt-5 text-[15px] leading-relaxed text-paper-dim sm:text-base">
+          The whole design follows from these. Each one is a constraint the gate can never
+          quietly break.
+        </p>
+      </Reveal>
+
+      <RevealGroup className="mt-10 border-t border-line">
         {TENETS.map((tenet, i) => (
-          <RevealItem key={tenet.title} className="h-full">
-            <motion.div
-              whileHover={reduce ? undefined : { y: -4 }}
-              transition={{ duration: 0.3, ease: EASE }}
-              className="flex h-full flex-col rounded-xl border border-line bg-ink-raised p-6 transition-colors hover:border-line-strong"
-            >
-              <span className="font-mono text-[12px] tracking-[0.1em] text-paper-dim">
-                {String(i + 1).padStart(2, "0")}
+          <RevealItem key={tenet.title}>
+            <div className="group grid grid-cols-[2.5rem_1fr] items-baseline gap-4 border-b border-line py-6 sm:grid-cols-[3.5rem_1fr] sm:gap-8 sm:py-7">
+              <span className="font-mono text-[13px] tabular-nums text-paper-dim transition-colors group-hover:text-paper">
+                0{i + 1}
               </span>
-              <h3 className="mt-5 font-display text-xl font-semibold tracking-tight text-paper">
-                {tenet.title}
-              </h3>
-              <p className="mt-3 text-[14.5px] leading-relaxed text-paper-dim">
-                {tenet.body}
-              </p>
-            </motion.div>
+              <div>
+                <h3 className="font-display text-xl font-semibold tracking-tight text-paper">
+                  {tenet.title}
+                </h3>
+                <p className="mt-2 max-w-xl text-[14.5px] leading-relaxed text-paper-dim">
+                  {tenet.body}
+                </p>
+              </div>
+            </div>
           </RevealItem>
         ))}
       </RevealGroup>
-    </section>
+    </Section>
   );
 }

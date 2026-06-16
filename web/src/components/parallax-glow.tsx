@@ -24,7 +24,7 @@ export function ParallaxGlow() {
   return (
     <motion.div
       aria-hidden
-      className="pointer-events-none absolute inset-x-0 top-0 h-[36rem] opacity-60"
+      className="pointer-events-none absolute inset-x-0 top-0 h-[36rem] opacity-50"
       style={{ background: GLOW, ...(reduce ? {} : { y }) }}
     />
   );
