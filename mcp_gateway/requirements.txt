@@ -1,0 +1,5 @@
+# Aegis MCP gateway dependencies.
+# The core gateway (mcp_gateway/gateway.py) needs only pyyaml, already pulled by the
+# repo-root requirements.txt for the policy loader. The MCP transport (server.py) adds:
+mcp>=1.2.0
+pyyaml>=6.0
