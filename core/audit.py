@@ -42,6 +42,7 @@ enforcement path clock-free.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -50,6 +51,83 @@ from typing import Any
 
 # Default log path; callers may override by passing log_path explicitly.
 DEFAULT_LOG_PATH = Path(__file__).parent.parent / "demos" / "audit.log.jsonl"
+
+
+def _record_hash(record: dict[str, Any]) -> str:
+    """SHA-256 over the record's CANONICAL form, excluding the `hash` field itself (Phase 3
+    slice 3d, ADR 0006 §d). Canonical = sorted keys, compact separators, ASCII-escaped — a
+    single deterministic byte string for a given record, so the same record always hashes the
+    same regardless of on-disk whitespace or key order. The hash covers `prev_hash`, so each
+    record commits to the entire chain before it; altering any earlier record changes every
+    later hash, and a verifier detects the break at exactly the altered record.
+    """
+    payload = {k: v for k, v in record.items() if k != "hash"}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _last_hash(path: Path) -> str | None:
+    """Return the `hash` of the last record already in the log, or None for a new/empty log.
+
+    WHY read the tail rather than track state: append_record is stateless; the previous hash
+    lives in the file, which is the single source of truth. A corrupt last line returns None,
+    so the next record anchors a fresh sub-chain from None — `verify_chain` still reports the
+    break at the CORRUPT line's index (the new record is not itself a second break).
+
+    SINGLE-WRITER assumption (ADR 0006 §d): this read-tail-then-append is not concurrency-safe.
+    Two processes appending to the same log at once (e.g. the loop and the API) can both read
+    the same tail and write the same prev_hash, forking the chain — `verify_chain` then flags
+    it. A cross-process lock / single append broker is deferred with multi-session support.
+    """
+    if not path.exists():
+        return None
+    last = None
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                last = line
+    if last is None:
+        return None
+    try:
+        parsed = json.loads(last)
+    except json.JSONDecodeError:
+        return None
+    return parsed.get("hash") if isinstance(parsed, dict) else None
+
+
+def verify_chain(log_path: Path | str | None = None) -> tuple[bool, int | None]:
+    """Verify the hash chain. Return (ok, first_broken_index).
+
+    Walks the log oldest-first: each record's `prev_hash` must equal the previous record's
+    `hash`, and each record's `hash` must equal its recomputed value. The first record whose
+    linkage or hash fails is returned as `first_broken_index` (and ok=False); a clean log
+    returns (True, None). A malformed/non-dict line is itself a break. WHY this is sound: the
+    hash never enters `decide` (it is written downstream of the decision, like `ts`), so adding
+    it changes no verdict; it only makes after-the-fact tampering detectable.
+    """
+    path = Path(log_path) if log_path is not None else DEFAULT_LOG_PATH
+    if not path.exists():
+        return (True, None)
+    prev: str | None = None
+    index = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            return (False, index)
+        if not isinstance(rec, dict):
+            return (False, index)
+        if rec.get("prev_hash") != prev:
+            return (False, index)
+        if rec.get("hash") != _record_hash(rec):
+            return (False, index)
+        prev = rec.get("hash")
+        index += 1
+    return (True, None)
 
 
 def append_record(
@@ -92,17 +170,23 @@ def append_record(
         # resolution, so the two records link without a join to anything outside the log.
         "approver": approver,
         "pending_id": pending_id,
-        # Phase 3 slice 3d will populate these with real SHA-256 values.
-        "prev_hash": None,
+        # Hash chain (Phase 3 slice 3d): prev_hash links to the last record already on disk;
+        # hash is this record's SHA-256 over its canonical form (set just below, after the
+        # whole record — including prev_hash — exists). Computed here, AFTER the decision and
+        # on the way to disk, so the chain never touches the deterministic gate.
+        "prev_hash": _last_hash(path),
         "hash": None,
     }
+    record["hash"] = _record_hash(record)
 
     # WHY "a" (append) not "w": the file is append-only by design.  Opening in
     # write mode would silently destroy prior records — exactly what the audit
     # trail must prevent.  Phase 3 will add OS-level append-only enforcement;
     # for now, "a" is both correct and the right semantic signal.
     with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
+        # sort_keys so the on-disk form matches the hash's canonical key order (purely
+        # cosmetic — verify_chain re-hashes via _record_hash regardless of on-disk order).
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
         # WHY flush + fsync before the `with` block closes:
         # Write-ahead ordering (ADR 0002) only delivers the guarantee "no
         # unlogged executed action" if the record survives a crash in the

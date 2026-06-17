@@ -384,9 +384,10 @@ class TestAuditIntegrity:
         assert record["params"] == {"sql": "DROP TABLE customers"}
         assert record["decision"] == "DENY"
         assert record["rule"] == "sql.deny_destructive"
-        # Phase 1: hash fields are reserved nulls
+        # Phase 3 slice 3d: the hash chain is live. This is the first record in a fresh log,
+        # so prev_hash is None (nothing before it); hash is its real sha256.
         assert record["prev_hash"] is None
-        assert record["hash"] is None
+        assert isinstance(record["hash"], str) and len(record["hash"]) == 64
         # Phase 1: identity/approver fields are reserved nulls (CLAUDE.md binding)
         assert record["session_id"] is None
         assert record["agent_id"] is None
@@ -415,7 +416,7 @@ class TestAuditIntegrity:
         assert record["decision"] == "ALLOW"
         assert record["rule"] == "customers.allow_lookup"
         assert record["prev_hash"] is None
-        assert record["hash"] is None
+        assert isinstance(record["hash"], str) and len(record["hash"]) == 64
 
     def test_one_record_per_tool_use_both_decisions(self, audit_log: Path, db_reset):
         """

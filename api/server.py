@@ -40,6 +40,7 @@ from core.approvals import (  # noqa: E402
     read_log,
     resolve,
 )
+from core.audit import verify_chain  # noqa: E402
 
 
 class Resolution(BaseModel):
@@ -119,6 +120,12 @@ def create_app(log_path: Path | str | None = None) -> FastAPI:
         # Clamp to [1, 1000] so a negative/zero/huge limit can never dump the whole trail.
         n = max(1, min(int(limit), 1000))
         return records[-n:]
+
+    @app.get("/audit/verify")
+    def audit_verify() -> dict[str, Any]:
+        """Verify the audit log's hash chain. Reports the first broken record, if any."""
+        ok, broken = verify_chain(resolved_log)
+        return {"ok": ok, "first_broken_index": broken}
 
     return app
 
