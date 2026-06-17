@@ -287,9 +287,9 @@ class TestPartialLoadForbidden:
             "    tool: lookup_customer\n"
             "    effect: ALLOW\n"
             "  - id: r.bad\n"
-            "    rationale: effect value unsupported in 2a\n"
+            "    rationale: effect value is not a real Decision\n"
             "    tool: execute_sql\n"
-            "    effect: REQUIRE_APPROVAL\n",  # rejected effect
+            "    effect: MAYBE\n",  # rejected effect (unknown; not one of the four)
             encoding="utf-8",
         )
 

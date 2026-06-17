@@ -166,6 +166,48 @@ def _make_audit_unavailable_result(tool_use_id: str) -> dict[str, Any]:
     }
 
 
+def _make_rate_limited_result(tool_use_id: str, rule_id: str) -> dict[str, Any]:
+    """Build the tool_result the model receives when a call is rate-limited (ADR 0006 §b).
+
+    WHY distinct from a DENY — the message must not lie: RATE_LIMIT refuses THIS attempt
+    because a per-run count threshold was crossed, not because the tool is permanently
+    forbidden. Naming the rule and the transient nature lets the model stop hammering this
+    tool rather than treat it as a hard policy block. is_error=True mirrors the other
+    refusals so the model gets a consistent error signal; the action did NOT execute.
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": (
+            f"[AEGIS RATE_LIMIT] This action was refused by policy rule '{rule_id}' because a "
+            "per-run usage limit for this tool was reached. The operation was NOT executed; "
+            "further calls to this tool this run will also be refused."
+        ),
+        "is_error": True,
+    }
+
+
+def _make_approval_required_result(tool_use_id: str, rule_id: str) -> dict[str, Any]:
+    """Build the tool_result the model receives when a call requires human approval.
+
+    Phase 3 slice 3a: the REQUIRE_APPROVAL verdict is real, but the out-of-band approval
+    HOLD (pending queue + FastAPI) lands in slice 3b. Until then this is a safe refusal that
+    does NOT execute — the fail-safe direction (ADR 0006 §c: the gate decides, the runtime
+    holds; with no hold wired yet, refuse). WHY distinct from DENY: the action is not
+    forbidden, it is awaiting a human; conflating the two would misinform the model and the
+    transcript.
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": (
+            f"[AEGIS REQUIRE_APPROVAL] This action requires human approval (policy rule "
+            f"'{rule_id}'). It was NOT executed. It is held pending approval, not denied."
+        ),
+        "is_error": True,
+    }
+
+
 def _make_allow_result(tool_use_id: str, raw_result: Any) -> dict[str, Any]:
     """Wrap a tool's return value in the Anthropic tool_result shape."""
     return {
@@ -347,10 +389,23 @@ def run_loop(
                     except Exception as exc:  # noqa: BLE001
                         raw = f"[ERROR] Tool raised an exception: {exc}"
                     tool_results.append(_make_allow_result(tool_use_id, raw))
+            elif result.decision is Decision.RATE_LIMIT:
+                # --- rate-limited (ADR 0006 §b) -----------------------------
+                # A per-run count threshold was crossed: refuse THIS attempt with a
+                # distinct message (not a permanent DENY). Still no execution — the
+                # single execute gate above (is Decision.ALLOW) stays the only path.
+                tool_results.append(_make_rate_limited_result(tool_use_id, result.rule_id))
+            elif result.decision is Decision.REQUIRE_APPROVAL:
+                # --- requires human approval (ADR 0006 §c) ------------------
+                # The verdict is real; the out-of-band HOLD (pending queue + API) is
+                # slice 3b. Until then: a safe, distinct refusal that does not execute.
+                tool_results.append(_make_approval_required_result(tool_use_id, result.rule_id))
             else:
-                # --- deny (DENY, RATE_LIMIT, REQUIRE_APPROVAL) ---------------
-                # WHY treat all non-ALLOW as non-executable: the safe default.
-                # RATE_LIMIT and REQUIRE_APPROVAL have no execution path yet.
+                # --- deny (DENY, and any unmapped verdict) ------------------
+                # WHY the else still catches "any other": the safe default refusal. The
+                # four Decision values above are exhaustive today, but an else that refuses
+                # means a hypothetical fifth verdict can never accidentally fall through to
+                # execution — execution is reachable through exactly one branch.
                 tool_results.append(_make_denial_result(tool_use_id, result.rule_id))
 
         # --- stop condition ---------------------------------------------------

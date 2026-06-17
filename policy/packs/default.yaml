@@ -93,3 +93,37 @@ rules:
       to:
         domain_in: [internal.example.com, partner.example.com]
     effect: ALLOW
+
+  # 7. issue_refund over the per-run cap — RATE_LIMIT (Phase 3, ADR 0006 §a/§b).
+  #    Placed ABOVE refunds.allow so the cap wins once the threshold is crossed
+  #    (first-match-wins, ADR 0003 §d). The count is over the recorded trajectory — a
+  #    sequence count, never a wall clock — so it stays deterministic (invariant 2).
+  - id: refunds.rate_limit
+    rationale: >-
+      An agent may issue at most 3 refunds in a single run; the 4th and later attempts are
+      refused as RATE_LIMIT. The limit is a count of prior ALLOWed issue_refund calls in
+      this run's recorded trajectory (ADR 0006), NOT a per-minute clock — same inputs always
+      decide the same way. This bounds blast radius if an agent loops on refunds.
+    tool: issue_refund
+    effect: RATE_LIMIT
+    count:
+      tool: issue_refund
+      max: 3
+
+  # 8. issue_refund below the cap — ALLOW. Reached only when rule 7 did not match.
+  - id: refunds.allow
+    rationale: >-
+      Allows issue_refund below the per-run cap (rule 7). A refund is a normal action up to
+      the limit; beyond it, the RATE_LIMIT above refuses further attempts this run.
+    tool: issue_refund
+    effect: ALLOW
+
+  # 9. export_data — REQUIRE_APPROVAL (Phase 3, ADR 0006 §c). Always held for a human.
+  - id: exports.require_approval
+    rationale: >-
+      Bulk data export is high-impact, so every export_data call is held for human approval:
+      the gate deterministically returns REQUIRE_APPROVAL and a human approves or denies it
+      out-of-band. Egress of data in bulk is exactly the action a least-privilege gate must
+      not auto-allow. The decision is pure; the hold is runtime (ADR 0006 §c).
+    tool: export_data
+    effect: REQUIRE_APPROVAL
