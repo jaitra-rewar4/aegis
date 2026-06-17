@@ -21,6 +21,7 @@ See docs/adr/0005-mcp-gateway.md.
 from __future__ import annotations
 
 import ast
+import math
 import operator
 import sys
 import warnings
@@ -124,9 +125,19 @@ _MAX_DEPTH = 100
 
 
 def _calc_capped(value: Any) -> Any:
-    """Reject an integer whose magnitude exceeds the result cap; pass anything else through."""
+    """Reject results that cannot be returned safely; pass anything else through.
+
+    Two guards: an integer whose magnitude exceeds the bit cap (the chained-exponent DoS),
+    and a non-finite float (inf/nan). A float overflow via `**` already raises OverflowError,
+    but multiplication/addition can reach inf silently (1e308 * 1e308), and a non-finite
+    number is both meaningless as a calculator result and unserializable under strict
+    JSON-RPC — returning it would crash the response AFTER the ALLOW was already logged,
+    which is a denial-of-decision. So we refuse it here, deterministically.
+    """
     if isinstance(value, int) and value.bit_length() > _MAX_RESULT_BITS:
         raise ValueError(f"result too large (>{_MAX_RESULT_BITS} bits)")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("result is not a finite number")
     return value
 
 

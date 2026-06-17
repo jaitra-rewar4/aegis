@@ -268,24 +268,15 @@ class TestTrajectoryAbuse:
 class TestParamNameMismatch:
     """
     The gate inspects the 'sql' key for execute_sql and the 'to' key for send_email.
-    A caller can pass the dangerous value under a different key name so decide() is
-    blind to it, while the body key-misses and runs harmlessly -- but the GATE DECISION
-    is wrong: it issued ALLOW for a call that should have been DENY'd.
+    A caller could once pass the dangerous value under a different key name so decide()
+    was blind to it, while the body key-missed and ran harmlessly -- but the GATE DECISION
+    was wrong: it issued ALLOW for a call that should have been DENY'd.
 
-    BUG: Confirmed in all variants below.
-    File: mcp_gateway/gateway.py Gateway.call()
-    Root cause: Gateway.call() passes the raw params dict to decide(). The engine rule
-    'sql.deny_destructive' inspects the 'sql' key specifically. A caller who passes
-    {'query': 'DROP TABLE x'} instead of {'sql': 'DROP TABLE x'} evades the DENY rule
-    because the 'sql' key is absent and _constraint_holds() returns False on absent keys.
-    The call then falls through to 'sql.allow_other' (no 'when' clause) and receives ALLOW.
-
-    The mock body uses params.get('sql', '') so the destructive query is not executed in
-    the mock, but the gate has already issued an incorrect ALLOW decision that would be
-    catastrophic in a real integration where the body used the alternative key.
-
-    Expected: DENY with rule sql.deny_destructive
-    Actual: ALLOW with rule sql.allow_other
+    FIXED (now regression tests): the param-key contract is enforced in
+    mcp_gateway/gateway.py via _TOOL_PARAM_KEYS. A known tool carrying any key outside its
+    declared set is refused as 'aegis.malformed_call' BEFORE decide() runs, so a payload
+    can no longer be smuggled under an unexpected key. The tests below now assert the
+    refusal (ok is False, decision DENY); they fail if the guard regresses.
     """
 
     def test_drop_table_via_wrong_key_is_denied(self, tmp_path: Path) -> None:
@@ -355,13 +346,18 @@ class TestParamNameMismatch:
         assert out["decision"] == "DENY"
         assert out["rule"] == "sql.deny_destructive"
 
-    def test_send_email_missing_to_key_is_denied(self, tmp_path: Path) -> None:
-        """send_email with no 'to' key falls to default deny (correct behavior)."""
+    def test_send_email_wrong_to_key_is_refused(self, tmp_path: Path) -> None:
+        """send_email with 'recipient' instead of 'to' is refused as a malformed call.
+
+        (After the param-key fix: 'recipient' is not in send_email's declared key set, so
+        it is refused with 'aegis.malformed_call' before decide() runs -- the payload can't
+        ride under a key the rule does not inspect.)
+        """
         gw, _ = _fresh(tmp_path)
         out = gw.call("send_email", {"recipient": "ops@partner.example.com"})
-        # 'to' is absent -> domain_in does not hold -> default deny
         assert out["ok"] is False
         assert out["decision"] == "DENY"
+        assert out["rule"] == "aegis.malformed_call"
 
 
 # ===========================================================================
@@ -443,32 +439,18 @@ class TestCalculatorEscape:
         # This is expected behavior (documenting the exact boundary).
         assert "result" in r
 
-    def test_chained_exponent_dos_bypass(self, tmp_path: Path) -> None:
+    def test_chained_exponent_dos_refused(self, tmp_path: Path) -> None:
         """
-        [BUG] (2**999)**999 and the triple chain ((2**999)**999)**999 slip through the
-        exponent cap because the cap only checks the IMMEDIATE right operand at each
-        BinOp Pow node -- it does not check whether the LEFT operand is itself enormous.
+        FIXED (now a regression test). (2**999)**999 once slipped through the exponent cap
+        because the cap only checked the IMMEDIATE right operand (a harmless 999) at each
+        Pow node, not the magnitude of the LEFT operand built by a prior level -- so the
+        chain built a ~300k-bit integer (and three levels deep hung for ~20s).
 
-        (2**999)**999:
-          - Inner: right=999, abs(999) <= 1000 -> allowed -> produces 2^999 (~300 digits)
-          - Outer: left=2^999, right=999 -> abs(999) <= 1000 -> allowed
-          -> computes 2^(999*999) = 2^998001 (~300 000-bit number)
-
-        ((2**999)**999)**999:
-          - Same chain, right=999 at every level -> allowed
-          -> takes ~20 seconds to compute, hanging the process
-
-        The cap must also guard against the RESULTING magnitude of left (e.g. by checking
-        bit_length of intermediate results), or by bounding total expression nesting depth.
-
-        Expected: error (DoS attempt rejected / timed out gracefully)
-        Actual:   RESULT type int, computation takes ~20 seconds
+        Fixed in mcp_gateway/gateway.py _calc_eval: a Pow pre-check projects the result size
+        (left.bit_length() * right) and refuses before building it, and _calc_capped rejects
+        any integer result over _MAX_RESULT_BITS. This test now asserts the refusal.
         """
-        # Two-level chain: completes in < 1 second but produces a 300k-bit integer.
-        # Verify it is ALLOWED (no error) -- this proves the cap is insufficient.
         r = _body_calculator({"expression": "(2**999)**999"})
-        # If this test FAILS (error returned), the DoS guard has been fixed -- good.
-        # If this test PASSES (result returned), the bypass exists.
         assert "error" in r, (
             "[BUG] (2**999)**999 was computed successfully. "
             "The exponent cap (abs(right) > 1000) does not limit the magnitude of the "
@@ -476,17 +458,16 @@ class TestCalculatorEscape:
             "integers and (at three levels deep) hang the process for ~20 seconds."
         )
 
-    def test_deeply_nested_addition_crashes_with_recursionerror(self, tmp_path: Path) -> None:
+    def test_deeply_nested_addition_does_not_crash(self, tmp_path: Path) -> None:
         """
-        [BUG] A deeply nested left-associative addition like 1+1+1+...+1 (>998 additions)
-        causes _calc_eval to exceed Python's recursion limit, and the RecursionError
-        propagates unhandled through Gateway.call, crashing the session.
+        FIXED (now a regression test). A deeply nested addition 1+1+1+...+1 once drove
+        _calc_eval past Python's recursion limit, and the RecursionError propagated
+        unhandled through Gateway.call -- a crash, i.e. a denial-of-decision.
 
-        The body docstring says the body never crashes the gateway, but an uncaught
-        RecursionError IS a crash and constitutes a denial-of-decision.
-
-        Expected: structured error result (ok=True, result={'error': '...'}) OR (ok=False, ...)
-        Actual:   unhandled RecursionError propagated from Gateway.call
+        Fixed in mcp_gateway/gateway.py: _calc_eval carries a depth counter and raises a
+        clean ValueError past _MAX_DEPTH (well before the stack limit), and the body's
+        except clause also catches RecursionError as a backstop. This test confirms a
+        structured result, never a crash.
         """
         gw, _ = _fresh(tmp_path)
         # 998 additions -> recursion depth ~998 in _calc_eval

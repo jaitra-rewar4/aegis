@@ -249,6 +249,32 @@ def test_email_body_param_is_not_inspected_by_the_gate(tmp_path: Path) -> None:
     assert out["rule"] == "email.allow_known_domains"
 
 
+def test_non_finite_calculator_result_refused(tmp_path: Path) -> None:
+    # A float that reaches inf via multiplication bypasses the integer size cap; the body
+    # must refuse it (a non-finite result is meaningless and unserializable under strict
+    # JSON-RPC), not return inf and risk crashing the response after the ALLOW was logged.
+    gw, _ = _fresh(tmp_path)
+    out = gw.call("calculator", {"expression": "1e308 * 1e308"})
+    assert out["ok"] is True  # calculator is pure -> ALLOW; the body reports the error.
+    assert "error" in out["result"]
+    assert "result" not in out["result"]
+
+
+def test_tool_param_keys_match_server_handler_signatures() -> None:
+    # The param-key contract must stay in sync with what the handlers actually pass, or a
+    # future handler edit could make every real transport call refuse as malformed. Pin it.
+    pytest.importorskip("mcp")
+    import inspect
+
+    from mcp_gateway import server
+    from mcp_gateway.gateway import _TOOL_PARAM_KEYS
+
+    for tool, allowed in _TOOL_PARAM_KEYS.items():
+        handler = getattr(server, tool)
+        sig_params = set(inspect.signature(handler).parameters)
+        assert sig_params == set(allowed), f"{tool}: handler {sig_params} vs schema {set(allowed)}"
+
+
 def test_server_handlers_delegate_to_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Only runs where the MCP SDK is installed; the core contract above does not need it.
     pytest.importorskip("mcp")
