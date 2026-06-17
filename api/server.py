@@ -70,6 +70,18 @@ def create_app(log_path: Path | str | None = None) -> FastAPI:
     resolved_log = log_path or os.environ.get("AEGIS_AUDIT_LOG") or None
     app = FastAPI(title="Aegis approvals", version="3.0", description="Human approval + audit view")
 
+    # CORS so the local dashboard (Next.js dev server) can call the API from the browser.
+    # WHY permissive in dev: this is a local operator tool with no auth yet (a documented
+    # gap, ADR 0006); a real deployment would lock origins down alongside writer auth.
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     def _do_resolve(pending_id: str, approve: bool, approver: str) -> dict[str, Any]:
         try:
             rec = resolve(pending_id, approve=approve, approver=approver, log_path=resolved_log)
