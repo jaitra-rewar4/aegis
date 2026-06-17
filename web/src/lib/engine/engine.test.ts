@@ -101,5 +101,23 @@ check("not_contains missing param -> default_deny (negation trap closed)", decid
 const allowDefaultPack: Pack = { version: 1, default: "allow", rules: [] };
 check("empty allow-default pack, any tool -> default_allow", decide(allowDefaultPack, "whatever", {}), "ALLOW", "policy.default_allow");
 
+// --- Phase 3: RATE_LIMIT (count) and REQUIRE_APPROVAL -----------------------------
+const refunds = (n: number) => Array.from({ length: n }, () => ({ tool: "issue_refund", decision: "ALLOW" }));
+check("refund, 0 prior -> allow (below cap)", decide(P, "issue_refund", {}, []), "ALLOW", "refunds.allow");
+check("refund, 2 prior -> allow (below cap 3)", decide(P, "issue_refund", {}, refunds(2)), "ALLOW", "refunds.allow");
+check("refund, 3 prior -> RATE_LIMIT (at cap)", decide(P, "issue_refund", {}, refunds(3)), "RATE_LIMIT", "refunds.rate_limit");
+check(
+  "refund, 3 DENYed priors do not count -> allow",
+  decide(P, "issue_refund", {}, [
+    { tool: "issue_refund", decision: "DENY" },
+    { tool: "issue_refund", decision: "DENY" },
+    { tool: "issue_refund", decision: "DENY" },
+  ]),
+  "ALLOW",
+  "refunds.allow",
+);
+check("export_data -> REQUIRE_APPROVAL", decide(P, "export_data", {}), "REQUIRE_APPROVAL", "exports.require_approval");
+
 console.log(`\n${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);
 if (failed > 0) throw new Error(`${failed} parity check(s) failed`);
