@@ -69,6 +69,7 @@ this explicit: only an exact ALLOW permits execution.
 from __future__ import annotations
 
 import os
+import uuid
 import warnings
 from pathlib import Path
 from typing import Any, Callable
@@ -187,22 +188,24 @@ def _make_rate_limited_result(tool_use_id: str, rule_id: str) -> dict[str, Any]:
     }
 
 
-def _make_approval_required_result(tool_use_id: str, rule_id: str) -> dict[str, Any]:
+def _make_approval_required_result(tool_use_id: str, rule_id: str, pending_id: str = "") -> dict[str, Any]:
+    # pending_id defaults to "" only so the helper is unit-testable in isolation; the loop,
+    # the sole production caller, always passes the real id from the held request record.
     """Build the tool_result the model receives when a call requires human approval.
 
-    Phase 3 slice 3a: the REQUIRE_APPROVAL verdict is real, but the out-of-band approval
-    HOLD (pending queue + FastAPI) lands in slice 3b. Until then this is a safe refusal that
-    does NOT execute — the fail-safe direction (ADR 0006 §c: the gate decides, the runtime
-    holds; with no hold wired yet, refuse). WHY distinct from DENY: the action is not
-    forbidden, it is awaiting a human; conflating the two would misinform the model and the
-    transcript.
+    The REQUIRE_APPROVAL verdict is held, not executed (ADR 0006 §c, the deferred model): the
+    request is recorded with a `pending_id`, this result tells the model the action is held
+    (not denied) and names the id, and a human resolves it out-of-band via the approval API.
+    The agent turn never blocks. WHY distinct from DENY: the action is not forbidden, it is
+    awaiting a human; conflating the two would misinform the model and the transcript.
     """
     return {
         "type": "tool_result",
         "tool_use_id": tool_use_id,
         "content": (
             f"[AEGIS REQUIRE_APPROVAL] This action requires human approval (policy rule "
-            f"'{rule_id}'). It was NOT executed. It is held pending approval, not denied."
+            f"'{rule_id}'). It was NOT executed; it is held pending approval (id={pending_id}), "
+            "not denied. A human can approve or deny it out-of-band."
         ),
         "is_error": True,
     }
@@ -338,6 +341,15 @@ def run_loop(
             # NOT execute regardless of what evaluate decided — an unlogged
             # executed action is the exact failure mode the audit trail exists
             # to prevent (ADR 0002 Option 3, "fail-closed, refuse + continue").
+            # A held REQUIRE_APPROVAL request gets a pending_id so a human can later resolve
+            # exactly this action via the approval API; the id links the request record to its
+            # resolution record. It is audit metadata (like ts), generated AFTER the decision —
+            # never an input to it, so it does not touch the deterministic gate (ADR 0006 §c).
+            pending_id = (
+                uuid.uuid4().hex[:12]
+                if result.decision is Decision.REQUIRE_APPROVAL
+                else None
+            )
             try:
                 record = append_record(
                     tool=tool_name,
@@ -345,6 +357,7 @@ def run_loop(
                     decision=result.decision.value,
                     rule=result.rule_id,
                     log_path=log_path,
+                    pending_id=pending_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 # WHY no decision here — only refusal:
@@ -397,9 +410,12 @@ def run_loop(
                 tool_results.append(_make_rate_limited_result(tool_use_id, result.rule_id))
             elif result.decision is Decision.REQUIRE_APPROVAL:
                 # --- requires human approval (ADR 0006 §c) ------------------
-                # The verdict is real; the out-of-band HOLD (pending queue + API) is
-                # slice 3b. Until then: a safe, distinct refusal that does not execute.
-                tool_results.append(_make_approval_required_result(tool_use_id, result.rule_id))
+                # Deferred hold: the request was recorded with a pending_id (above); tell the
+                # model it is held (not executed), and a human resolves it out-of-band via the
+                # approval API. The loop never blocks; execution does not happen here.
+                tool_results.append(
+                    _make_approval_required_result(tool_use_id, result.rule_id, record["pending_id"])
+                )
             else:
                 # --- deny (DENY, and any unmapped verdict) ------------------
                 # WHY the else still catches "any other": the safe default refusal. The

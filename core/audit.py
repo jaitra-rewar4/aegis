@@ -15,9 +15,10 @@ Record shape (stable across phases):
         "params":     { ... },
         "decision":   "ALLOW" | "DENY" | ...,
         "rule":       "<rule_id>",
-        "approver":   null,  # reserved — set by the REQUIRE_APPROVAL flow later
-        "prev_hash":  null,  # reserved — hash-chaining lands in Phase 3
-        "hash":       null   # reserved — hash-chaining lands in Phase 3
+        "approver":   null,  # set by the REQUIRE_APPROVAL resolution (Phase 3 slice 3b)
+        "pending_id": null,  # links a held REQUIRE_APPROVAL request to its later resolution
+        "prev_hash":  null,  # reserved — hash-chaining lands in Phase 3 slice 3d
+        "hash":       null   # reserved — hash-chaining lands in Phase 3 slice 3d
     }
 
 WHY reserve prev_hash / hash as null now: Phase 3 makes the log append-only
@@ -61,6 +62,7 @@ def append_record(
     session_id: str | None = None,
     agent_id: str | None = None,
     approver: str | None = None,
+    pending_id: str | None = None,
 ) -> dict[str, Any]:
     """Build an audit record, append it to the JSONL log, and return it.
 
@@ -85,9 +87,12 @@ def append_record(
         "params": params,
         "decision": decision,
         "rule": rule,
-        # Reserved for the human approval flow — null until REQUIRE_APPROVAL ships.
+        # The human approval flow (Phase 3 slice 3b): `approver` is set on a resolution
+        # record; `pending_id` is set on a held REQUIRE_APPROVAL request AND on its
+        # resolution, so the two records link without a join to anything outside the log.
         "approver": approver,
-        # Phase 3 will populate these with real SHA-256 values.
+        "pending_id": pending_id,
+        # Phase 3 slice 3d will populate these with real SHA-256 values.
         "prev_hash": None,
         "hash": None,
     }

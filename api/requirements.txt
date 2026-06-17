@@ -1,0 +1,6 @@
+# Aegis approval API dependencies. The approval store (core/approvals.py) needs only the
+# stdlib + the existing audit writer; the HTTP surface adds:
+fastapi>=0.110
+uvicorn>=0.27
+pydantic>=2.0
+pyyaml>=6.0
