@@ -12,8 +12,8 @@
  * in the playground phase; for now `packs/default.ts` is written directly in normalized form.
  */
 
-/** core.decision.Decision — the two terminal verdicts. */
-export type Decision = "ALLOW" | "DENY";
+/** core.decision.Decision — all four verdicts (Phase 3 makes RATE_LIMIT/REQUIRE_APPROVAL real). */
+export type Decision = "ALLOW" | "DENY" | "RATE_LIMIT" | "REQUIRE_APPROVAL";
 
 /** core.decision.GatewayResult — what `decide` returns. `ruleId` is Python's `rule_id`. */
 export interface GatewayResult {
@@ -21,8 +21,15 @@ export interface GatewayResult {
   ruleId: string;
 }
 
-/** A rule's declared effect when it matches. */
-export type Effect = "ALLOW" | "DENY";
+/** A rule's declared effect when it matches (all four valid in Phase 3, ADR 0006 §b). */
+export type Effect = "ALLOW" | "DENY" | "RATE_LIMIT" | "REQUIRE_APPROVAL";
+
+/** The Phase-3 `count` clause (ADR 0006 §a): fire when the trajectory holds >= max prior
+ *  ALLOWed records for `tool`. The TS port of policy.schema.CountClause. */
+export interface CountClause {
+  tool: string;
+  max: number;
+}
 
 /** The eight operators registered in engine.py's _OPERATOR_EVALUATORS. */
 export type OperatorName =
@@ -45,6 +52,8 @@ export interface Rule {
   effect: Effect;
   /** The 2b `after` clause, normalized to a bare tool string — or null when absent. */
   after: string | null;
+  /** The Phase-3 `count` clause, or null/absent when the rule never counts the trajectory. */
+  count?: CountClause | null;
   /** param_name -> (operator, operand). Empty object when the rule has no `when`. */
   when: Record<string, Constraint>;
 }

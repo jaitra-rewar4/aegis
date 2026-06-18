@@ -43,6 +43,9 @@ export function TopNav() {
         <a href="/playground" className={link}>
           Playground
         </a>
+        <a href="/console" className={link}>
+          Console
+        </a>
         <a href={REPO_URL} target="_blank" rel="noreferrer" className={link}>
           GitHub
         </a>

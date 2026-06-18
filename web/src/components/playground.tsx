@@ -14,10 +14,9 @@ import { useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { decide } from "@/lib/engine/engine";
 import { defaultPack } from "@/lib/engine/packs/default";
-import type { Rule } from "@/lib/engine/types";
+import type { Decision, Rule } from "@/lib/engine/types";
 import { EASE } from "@/lib/motion";
 
-type Decision = "ALLOW" | "DENY";
 type TrajItem = { tool: string; decision: Decision };
 type Field = { key: string; initial: string };
 type ToolDef = { name: string; label: string; fields: Field[]; custom?: boolean };

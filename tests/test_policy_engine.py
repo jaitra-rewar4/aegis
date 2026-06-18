@@ -205,14 +205,26 @@ def test_empty_or_bad_tool_rejected(tool):
         validate(raw)
 
 
-@pytest.mark.parametrize("effect", ["allow", "Deny", "RATE_LIMIT", "REQUIRE_APPROVAL", "", None, 5])
+@pytest.mark.parametrize("effect", ["allow", "Deny", "Allow", "MAYBE", "", None, 5])
 def test_bad_effect_rejected(effect):
-    # RATE_LIMIT and REQUIRE_APPROVAL are explicitly refused in 2a (ADR 0003).
+    # All four Decision values are valid effects in Phase 3 (ADR 0006 §b). What stays
+    # rejected: wrong case ("allow"/"Deny"/"Allow"), an unknown effect ("MAYBE"), empty,
+    # None, and non-strings. RATE_LIMIT / REQUIRE_APPROVAL are now accepted (tested below).
     raw = _minimal_pack_dict(
         rules=[{"id": "r.one", "rationale": "ok", "tool": "t", "effect": effect}]
     )
     with pytest.raises(PolicyError):
         validate(raw)
+
+
+@pytest.mark.parametrize("effect", ["ALLOW", "DENY", "RATE_LIMIT", "REQUIRE_APPROVAL"])
+def test_all_four_effects_accepted(effect):
+    # Phase 3 widened _ALLOWED_EFFECTS to all four Decision values (ADR 0006 §b).
+    raw = _minimal_pack_dict(
+        rules=[{"id": "r.one", "rationale": "ok", "tool": "t", "effect": effect}]
+    )
+    pack = validate(raw)
+    assert pack.rules[0].effect == effect
 
 
 @pytest.mark.parametrize("when", ["nope", 5, ["a"], {"p": "string"}, {"p": 5}])
@@ -558,6 +570,10 @@ def test_loader_loads_default_pack():
         "math.allow_calculator",
         "email.deny_exfil_after_read",
         "email.allow_known_domains",
+        # Phase 3 (ADR 0006): a counted RATE_LIMIT pair and an approval-gated tool.
+        "refunds.rate_limit",
+        "refunds.allow",
+        "exports.require_approval",
     ]
     # The destructive-SQL rule's rationale states it is a documented-gap stopgap.
     deny_rule = pack.rules[0]

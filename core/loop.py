@@ -69,6 +69,7 @@ this explicit: only an exact ALLOW permits execution.
 from __future__ import annotations
 
 import os
+import uuid
 import warnings
 from pathlib import Path
 from typing import Any, Callable
@@ -161,6 +162,50 @@ def _make_audit_unavailable_result(tool_use_id: str) -> dict[str, Any]:
             f"[AEGIS OPERATIONAL REFUSAL] Action was blocked because the audit log "
             f"is unavailable (marker: '{AUDIT_UNAVAILABLE_MARKER}'). "
             "The requested operation was NOT executed."
+        ),
+        "is_error": True,
+    }
+
+
+def _make_rate_limited_result(tool_use_id: str, rule_id: str) -> dict[str, Any]:
+    """Build the tool_result the model receives when a call is rate-limited (ADR 0006 §b).
+
+    WHY distinct from a DENY — the message must not lie: RATE_LIMIT refuses THIS attempt
+    because a per-run count threshold was crossed, not because the tool is permanently
+    forbidden. Naming the rule and the transient nature lets the model stop hammering this
+    tool rather than treat it as a hard policy block. is_error=True mirrors the other
+    refusals so the model gets a consistent error signal; the action did NOT execute.
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": (
+            f"[AEGIS RATE_LIMIT] This action was refused by policy rule '{rule_id}' because a "
+            "per-run usage limit for this tool was reached. The operation was NOT executed; "
+            "further calls to this tool this run will also be refused."
+        ),
+        "is_error": True,
+    }
+
+
+def _make_approval_required_result(tool_use_id: str, rule_id: str, pending_id: str = "") -> dict[str, Any]:
+    # pending_id defaults to "" only so the helper is unit-testable in isolation; the loop,
+    # the sole production caller, always passes the real id from the held request record.
+    """Build the tool_result the model receives when a call requires human approval.
+
+    The REQUIRE_APPROVAL verdict is held, not executed (ADR 0006 §c, the deferred model): the
+    request is recorded with a `pending_id`, this result tells the model the action is held
+    (not denied) and names the id, and a human resolves it out-of-band via the approval API.
+    The agent turn never blocks. WHY distinct from DENY: the action is not forbidden, it is
+    awaiting a human; conflating the two would misinform the model and the transcript.
+    """
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": (
+            f"[AEGIS REQUIRE_APPROVAL] This action requires human approval (policy rule "
+            f"'{rule_id}'). It was NOT executed; it is held pending approval (id={pending_id}), "
+            "not denied. A human can approve or deny it out-of-band."
         ),
         "is_error": True,
     }
@@ -296,6 +341,15 @@ def run_loop(
             # NOT execute regardless of what evaluate decided — an unlogged
             # executed action is the exact failure mode the audit trail exists
             # to prevent (ADR 0002 Option 3, "fail-closed, refuse + continue").
+            # A held REQUIRE_APPROVAL request gets a pending_id so a human can later resolve
+            # exactly this action via the approval API; the id links the request record to its
+            # resolution record. It is audit metadata (like ts), generated AFTER the decision —
+            # never an input to it, so it does not touch the deterministic gate (ADR 0006 §c).
+            pending_id = (
+                uuid.uuid4().hex[:12]
+                if result.decision is Decision.REQUIRE_APPROVAL
+                else None
+            )
             try:
                 record = append_record(
                     tool=tool_name,
@@ -303,6 +357,7 @@ def run_loop(
                     decision=result.decision.value,
                     rule=result.rule_id,
                     log_path=log_path,
+                    pending_id=pending_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 # WHY no decision here — only refusal:
@@ -347,10 +402,26 @@ def run_loop(
                     except Exception as exc:  # noqa: BLE001
                         raw = f"[ERROR] Tool raised an exception: {exc}"
                     tool_results.append(_make_allow_result(tool_use_id, raw))
+            elif result.decision is Decision.RATE_LIMIT:
+                # --- rate-limited (ADR 0006 §b) -----------------------------
+                # A per-run count threshold was crossed: refuse THIS attempt with a
+                # distinct message (not a permanent DENY). Still no execution — the
+                # single execute gate above (is Decision.ALLOW) stays the only path.
+                tool_results.append(_make_rate_limited_result(tool_use_id, result.rule_id))
+            elif result.decision is Decision.REQUIRE_APPROVAL:
+                # --- requires human approval (ADR 0006 §c) ------------------
+                # Deferred hold: the request was recorded with a pending_id (above); tell the
+                # model it is held (not executed), and a human resolves it out-of-band via the
+                # approval API. The loop never blocks; execution does not happen here.
+                tool_results.append(
+                    _make_approval_required_result(tool_use_id, result.rule_id, record["pending_id"])
+                )
             else:
-                # --- deny (DENY, RATE_LIMIT, REQUIRE_APPROVAL) ---------------
-                # WHY treat all non-ALLOW as non-executable: the safe default.
-                # RATE_LIMIT and REQUIRE_APPROVAL have no execution path yet.
+                # --- deny (DENY, and any unmapped verdict) ------------------
+                # WHY the else still catches "any other": the safe default refusal. The
+                # four Decision values above are exhaustive today, but an else that refuses
+                # means a hypothetical fifth verdict can never accidentally fall through to
+                # execution — execution is reachable through exactly one branch.
                 tool_results.append(_make_denial_result(tool_use_id, result.rule_id))
 
         # --- stop condition ---------------------------------------------------

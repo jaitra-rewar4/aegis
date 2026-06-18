@@ -24,6 +24,7 @@
 
 import type {
   Constraint,
+  CountClause,
   Decision,
   Effect,
   GatewayResult,
@@ -31,6 +32,15 @@ import type {
   Pack,
   Rule,
 } from "./types";
+
+// Total effect -> Decision map (ADR 0006 §b). The pack guarantees one of these four; the
+// DENY fallback is an unreachable fail-safe for a corrupted in-memory pack.
+const EFFECT_TO_DECISION: Record<Effect, Decision> = {
+  ALLOW: "ALLOW",
+  DENY: "DENY",
+  RATE_LIMIT: "RATE_LIMIT",
+  REQUIRE_APPROVAL: "REQUIRE_APPROVAL",
+};
 
 // --- engine markers (reserved policy.* namespace; packs may not mint these) ---
 export const RULE_NO_PACK = "policy.no_pack";
@@ -190,8 +200,33 @@ function afterHolds(afterTool: string | null, trajectory: unknown): boolean {
   return false;
 }
 
-// A rule matches iff tool matches AND `after` holds AND every `when` constraint holds
-// (conjunctive). `when` iteration order changes only short-circuit timing, never the result.
+// True iff the rule's `count` clause holds: the trajectory holds >= count.max prior ALLOWed
+// records for count.tool (ADR 0006 §a). A pure list-scan, never a clock — the TS port of
+// _count_holds. A null/absent clause -> true WITHOUT touching the trajectory (a rule with no
+// count clause never reads it). A null/empty/non-array trajectory counts 0, so the clause
+// holds only when max <= 0. Junk entries are skipped (object gate before field access), and
+// only `decision === "ALLOW"` records count — the same fail-safe direction as afterHolds.
+function countHolds(count: CountClause | null | undefined, trajectory: unknown): boolean {
+  if (count == null) return true;
+  if (!Array.isArray(trajectory) || trajectory.length === 0) return count.max <= 0;
+  let seen = 0;
+  for (const entry of trajectory) {
+    if (
+      entry !== null &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      (entry as Record<string, unknown>).tool === count.tool &&
+      (entry as Record<string, unknown>).decision === "ALLOW"
+    ) {
+      seen += 1;
+    }
+  }
+  return seen >= count.max;
+}
+
+// A rule matches iff tool matches AND `after` holds AND `count` holds AND every `when`
+// constraint holds (all conjunctive). `when` iteration order changes only short-circuit
+// timing, never the result.
 function ruleMatches(
   rule: Rule,
   tool: string,
@@ -200,6 +235,7 @@ function ruleMatches(
 ): boolean {
   if (rule.tool !== tool) return false;
   if (!afterHolds(rule.after, trajectory)) return false;
+  if (!countHolds(rule.count, trajectory)) return false;
   for (const paramName of Object.keys(rule.when)) {
     const [operator, operand]: Constraint = rule.when[paramName];
     if (!constraintHolds(params, paramName, operator, operand)) return false;
@@ -233,7 +269,7 @@ export function decide(
 
   for (const rule of pack.rules) {
     if (ruleMatches(rule, tool, params, trajectory)) {
-      const decision: Decision = rule.effect === "ALLOW" ? "ALLOW" : "DENY";
+      const decision: Decision = EFFECT_TO_DECISION[rule.effect] ?? "DENY";
       return { decision, ruleId: rule.id };
     }
   }

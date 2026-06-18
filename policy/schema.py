@@ -20,9 +20,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
-__all__ = ["PolicyError", "Rule", "Pack", "validate"]
+__all__ = ["PolicyError", "Rule", "Pack", "CountClause", "validate"]
+
+
+class CountClause(NamedTuple):
+    """A validated `count` clause: fire when the trajectory holds >= `max` prior ALLOWed
+    records for `tool` (ADR 0006 §a). A NamedTuple so it is deeply immutable like a bare
+    str/tuple, yet reads as `clause.tool` / `clause.max` in the engine."""
+
+    tool: str
+    max: int
+
+
+# Sentinel to distinguish an ABSENT optional key from one explicitly set to null. WHY:
+# raw.get("count") returns None both when the key is missing and when it is `count: null`;
+# the strict validator must reject an explicit null clause (it is not the {tool, max} shape)
+# rather than silently treat it as "no clause" — an author who wrote `count: null` did not
+# write a valid clause, and ADR 0003 §c rejects anything that is not exactly the spec.
+_ABSENT = object()
 
 
 class PolicyError(Exception):
@@ -68,6 +85,14 @@ class Rule:
     # work, not 2b (ADR 0004 §e Out of scope). A plain str is also trivially immutable,
     # so it needs no MappingProxy/tuple wrapping to stay deeply frozen like `when`.
     after: str | None  # the tool name a prior ALLOWed record must carry, or None.
+    # `count`: the validated Phase-3 RATE_LIMIT clause (ADR 0006 §a), or None when absent.
+    # Stored as a CountClause(tool, max) — deeply immutable, named. WHY a separate clause
+    # from `after`: `after` is a boolean "did an ALLOWed X happen?"; `count` is an arithmetic
+    # "how many ALLOWed X, and is that >= max?". Keeping them distinct keeps each predicate
+    # single-purpose. A None `count` means the rule never counts the trajectory (and a pack
+    # with no `count` rule is byte-for-byte 2a/2b — the engine never reads the trajectory for it).
+    # Defaults to None so a rule with no rate clause constructs unchanged (the common case).
+    count: CountClause | None = None
 
 
 @dataclass(frozen=True)
@@ -91,8 +116,10 @@ _RESERVED_ID_PREFIXES: tuple[str, ...] = ("aegis.", "policy.")
 _ALLOWED_PACK_KEYS: frozenset[str] = frozenset({"version", "default", "rules"})
 
 # The only keys a rule may contain. Anything else -> reject.
-# `after` joins the set in 2b (ADR 0004 §e): the optional trajectory clause.
-_ALLOWED_RULE_KEYS: frozenset[str] = frozenset({"id", "rationale", "tool", "when", "effect", "after"})
+# `after` joins the set in 2b (ADR 0004 §e); `count` joins in Phase 3 (ADR 0006 §a).
+_ALLOWED_RULE_KEYS: frozenset[str] = frozenset(
+    {"id", "rationale", "tool", "when", "effect", "after", "count"}
+)
 
 # The only keys an `after` mapping may contain in 2b — exactly the one key `tool`.
 # WHY a named constant for a single-element set: it makes the 2b `after` shape
@@ -101,12 +128,18 @@ _ALLOWED_RULE_KEYS: frozenset[str] = frozenset({"id", "rationale", "tool", "when
 # grows param constraints / multiple tools later (explicitly future work).
 _ALLOWED_AFTER_KEYS: frozenset[str] = frozenset({"tool"})
 
-# The only effect values 2a accepts. RATE_LIMIT / REQUIRE_APPROVAL are rejected at
-# load (ADR 0003 Out of scope): the loop treats every non-ALLOW as a blunt refusal
-# with no approval ever solicited, so accepting REQUIRE_APPROVAL would ship a rule
-# that lies about itself. Refusing it here makes the gap loud. Widening later is
-# backward-compatible; narrowing is not — so we start narrow.
-_ALLOWED_EFFECTS: frozenset[str] = frozenset({"ALLOW", "DENY"})
+# The only keys a `count` mapping may contain (Phase 3, ADR 0006 §a): exactly `tool`
+# and `max`. A named constant makes the count shape a reviewable datum and gives
+# _normalize_count one place to widen if counts ever grow (sliding windows, per-param
+# counts) — explicitly future work.
+_ALLOWED_COUNT_KEYS: frozenset[str] = frozenset({"tool", "max"})
+
+# The effect values a pack may declare. Phase 3 (ADR 0006 §b) widens this to all four
+# Decision values: RATE_LIMIT and REQUIRE_APPROVAL now have real runtime behaviour (a
+# count-based transient refusal, and a human-approval hold), so a rule may declare them
+# without lying about itself. ALLOW/DENY are unchanged. Widening is backward-compatible;
+# a pack written for 2a still validates identically.
+_ALLOWED_EFFECTS: frozenset[str] = frozenset({"ALLOW", "DENY", "RATE_LIMIT", "REQUIRE_APPROVAL"})
 
 # Operators that take a numeric operand (int/float, NOT bool — see below).
 _NUMERIC_OPERATORS: frozenset[str] = frozenset({"max", "min"})
@@ -287,6 +320,58 @@ def _normalize_after(rule_id: str, raw_after: Any) -> str:
     return after_tool
 
 
+def _normalize_count(rule_id: str, raw_count: Any) -> CountClause:
+    """Validate a raw `count` clause and return a CountClause, or raise PolicyError.
+
+    Mirrors _normalize_after's discipline (ADR 0006 §a): `count`, when present, must be a
+    dict with EXACTLY the two keys `tool` (non-empty string) and `max` (non-negative int,
+    NOT bool). Anything else rejects the WHOLE pack (ADR 0003 §c all-or-nothing):
+      - non-dict,
+      - unknown / missing keys (anything but exactly {tool, max}),
+      - `tool` empty or non-string,
+      - `max` non-int, bool, or negative.
+
+    WHY `max >= 0` and bool excluded: the same precedent as numeric operands (_is_real_number)
+    and `version` — YAML `true`/`yes` parse to bool, and a negative threshold has no meaning
+    (a count is never < 0, so `max: -1` would be a rule that can never fire, almost certainly
+    an authoring mistake). `max: 0` IS allowed (ADR 0006 §a): it is the honest "rate-limited
+    from the very first call" and stays predictable (count 0 >= 0 holds immediately).
+    """
+    if not isinstance(raw_count, dict):
+        raise PolicyError(
+            f"rule '{rule_id}': 'count' must be a mapping {{tool: <non-empty string>, "
+            f"max: <non-negative int>}}, got {raw_count!r}"
+        )
+
+    unknown = set(raw_count.keys()) - _ALLOWED_COUNT_KEYS
+    if unknown:
+        raise PolicyError(
+            f"rule '{rule_id}': 'count' has unknown key(s): {sorted(unknown)!r} "
+            f"(the only allowed keys are 'tool' and 'max')"
+        )
+
+    if set(raw_count.keys()) != _ALLOWED_COUNT_KEYS:
+        raise PolicyError(
+            f"rule '{rule_id}': 'count' must have exactly the keys 'tool' and 'max', "
+            f"got {sorted(raw_count.keys())!r}"
+        )
+
+    count_tool = raw_count.get("tool")
+    if not isinstance(count_tool, str) or not count_tool:
+        raise PolicyError(
+            f"rule '{rule_id}': 'count.tool' must be a non-empty string, got {count_tool!r}"
+        )
+
+    count_max = raw_count.get("max")
+    # bool excluded explicitly (isinstance(True, int) is True); negative rejected.
+    if not isinstance(count_max, int) or isinstance(count_max, bool) or count_max < 0:
+        raise PolicyError(
+            f"rule '{rule_id}': 'count.max' must be a non-negative integer, got {count_max!r}"
+        )
+
+    return CountClause(tool=count_tool, max=count_max)
+
+
 def _validate_rule(raw: Any, seen_ids: set[str]) -> Rule:
     """Validate one raw rule dict and return a frozen Rule, or raise PolicyError."""
     if not isinstance(raw, dict):
@@ -330,21 +415,41 @@ def _validate_rule(raw: Any, seen_ids: set[str]) -> Rule:
     if effect not in _ALLOWED_EFFECTS:
         raise PolicyError(
             f"rule '{rule_id}': 'effect' must be exactly one of {sorted(_ALLOWED_EFFECTS)!r}, "
-            f"got {effect!r} (RATE_LIMIT / REQUIRE_APPROVAL are rejected in 2a — ADR 0003)"
+            f"got {effect!r} (all four Decision values are accepted in Phase 3 — ADR 0006)"
         )
 
     # `when` is optional; absent means the rule matches any call to that tool.
     raw_when = raw.get("when")
     when = {} if raw_when is None else _normalize_when(rule_id, raw_when)
 
-    # `after` is optional (ADR 0004 §e); absent means the rule never consults the
-    # trajectory and behaves exactly like a 2a rule. Stored as the bare tool name or None.
-    raw_after = raw.get("after")
-    after = None if raw_after is None else _normalize_after(rule_id, raw_after)
+    # `after` is optional (ADR 0004 §e); ABSENT (not present) means the rule never consults
+    # the trajectory and behaves exactly like a 2a rule. An explicit `after: null` is NOT
+    # absent — it is a malformed clause and is rejected (via the _ABSENT sentinel, so a
+    # missing key and an explicit null are distinguished). Stored as the bare tool name or None.
+    raw_after = raw.get("after", _ABSENT)
+    after = None if raw_after is _ABSENT else _normalize_after(rule_id, raw_after)
+
+    # `count` is optional (ADR 0006 §a); ABSENT means the rule never counts the trajectory.
+    # An explicit `count: null` is likewise malformed and rejected (not silently "no clause").
+    # Stored as a CountClause(tool, max) or None.
+    raw_count = raw.get("count", _ABSENT)
+    count = None if raw_count is _ABSENT else _normalize_count(rule_id, raw_count)
+
+    # A `count` clause is only meaningful on a RATE_LIMIT or REQUIRE_APPROVAL rule (ADR 0006
+    # §a/§b). On an ALLOW or DENY rule it is a footgun: a counted DENY would STOP firing once
+    # the count drops below the threshold (a denial that gets easier to evade as calls
+    # accumulate), and a counted ALLOW would only permit after N prior calls — neither is a
+    # least-privilege control anyone is likely to mean. Reject it at load so the gap is loud.
+    if count is not None and effect not in ("RATE_LIMIT", "REQUIRE_APPROVAL"):
+        raise PolicyError(
+            f"rule '{rule_id}': a 'count' clause is only allowed on a RATE_LIMIT or "
+            f"REQUIRE_APPROVAL rule, not on effect {effect!r} (ADR 0006 §a)"
+        )
 
     # MappingProxyType: a read-only view, so the validated constraint set cannot be
     # mutated in place after validation (deep immutability — see the Rule docstring).
-    # `after` is a bare str (or None), already deeply immutable, so it needs no wrapper.
+    # `after` is a bare str (or None) and `count` a CountClause/None, already deeply
+    # immutable, so they need no wrapper.
     return Rule(
         id=rule_id,
         rationale=rationale,
@@ -352,6 +457,7 @@ def _validate_rule(raw: Any, seen_ids: set[str]) -> Rule:
         when=MappingProxyType(when),
         effect=effect,
         after=after,
+        count=count,
     )
 
 

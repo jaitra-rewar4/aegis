@@ -69,5 +69,31 @@ export const defaultPack: Pack = {
       },
       effect: "ALLOW",
     },
+    // 7. issue_refund over the per-run cap — RATE_LIMIT (Phase 3). A count over the recorded
+    //    trajectory (never a clock). Placed above refunds.allow so the cap wins at the threshold.
+    {
+      id: "refunds.rate_limit",
+      tool: "issue_refund",
+      after: null,
+      count: { tool: "issue_refund", max: 3 },
+      when: {},
+      effect: "RATE_LIMIT",
+    },
+    // 8. issue_refund below the cap — ALLOW. Reached only when rule 7 did not match.
+    {
+      id: "refunds.allow",
+      tool: "issue_refund",
+      after: null,
+      when: {},
+      effect: "ALLOW",
+    },
+    // 9. export_data — REQUIRE_APPROVAL (Phase 3). Always held for a human's sign-off.
+    {
+      id: "exports.require_approval",
+      tool: "export_data",
+      after: null,
+      when: {},
+      effect: "REQUIRE_APPROVAL",
+    },
   ],
 };

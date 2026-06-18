@@ -30,7 +30,7 @@ import re
 from typing import Any
 
 from core.decision import Decision, GatewayResult
-from policy.schema import Pack, Rule
+from policy.schema import CountClause, Pack, Rule
 
 __all__ = [
     "decide",
@@ -38,6 +38,17 @@ __all__ = [
     "RULE_DEFAULT_DENY",
     "RULE_DEFAULT_ALLOW",
 ]
+
+# Total mapping from a validated rule effect to its Decision (ADR 0006 §b). The schema
+# guarantees `effect` is one of these four, so the `.get(..., DENY)` fallback is an
+# unreachable fail-safe: an unknown effect could only arise from a corrupted in-memory
+# Pack, and the safe direction for the gate is always DENY.
+_EFFECT_TO_DECISION: dict[str, Decision] = {
+    "ALLOW": Decision.ALLOW,
+    "DENY": Decision.DENY,
+    "RATE_LIMIT": Decision.RATE_LIMIT,
+    "REQUIRE_APPROVAL": Decision.REQUIRE_APPROVAL,
+}
 
 # --- engine markers (ADR 0003 §f) -------------------------------------------------
 # These live in the reserved `policy.*` namespace (packs are forbidden from minting
@@ -253,18 +264,53 @@ def _after_holds(after_tool: str | None, trajectory: Any) -> bool:
     return False
 
 
-def _rule_matches(rule: Rule, tool: str, params: dict, trajectory: Any) -> bool:
-    """A rule matches iff tool equals the call's tool AND `after` holds AND every `when` holds.
+def _count_holds(count: CountClause | None, trajectory: Any) -> bool:
+    """True iff the rule's `count` clause holds: the trajectory holds >= count.max prior
+    ALLOWed records for count.tool (ADR 0006 §a). A pure list-scan, never a clock.
 
-    The three are conjunctive (ADR 0004 §e: `after` is conjunctive with tool and when).
-    WHY iteration order over `when` does not affect the outcome: the result is an AND of
-    predicates, so dict iteration order changes only short-circuit timing, never the
-    decision (ADR 0003 §d, determinism). For a rule with `after is None`, _after_holds
-    returns True without reading the trajectory, so a 2a rule never touches it.
+    - `count is None` -> True WITHOUT reading the trajectory. A rule with no `count` clause
+      never consults it — the same vacuous-True discipline as `_after_holds` (a 2a/2b pack is
+      byte-for-byte unchanged, because nothing reads the trajectory for it).
+    - count over a None/empty trajectory is 0: with `max: 0` the threshold `0 >= 0` holds and
+      the rule fires immediately; with `max >= 1` it does not (the same fail-safe direction as
+      a missing param — not enough evidence -> does-not-hold, here "not enough prior calls").
+    - non-dict / wrong-typed entries are skipped (isinstance gate FIRST, then `.get` with safe
+      defaults — never entry["tool"]), exactly as `_after_holds`. The scan is total over
+      whatever the list contains and never crashable from its inputs.
+
+    DETERMINISM (invariant 2): this reads `trajectory` (input data) and the literal `count.max`.
+    No clock, no `now()`, no `ts` field, no random, no I/O. The current proposal is never in
+    its own trajectory (the loop appends a record AFTER evaluate returns — ADR 0002/0004), so
+    `max: N` trips on the (N+1)th call: N strictly-earlier ALLOWed records, plus this one.
+    """
+    if count is None:
+        return True
+    if not trajectory:  # None or empty -> nothing counted -> 0 >= max only when max is 0.
+        return count.max <= 0
+    seen = 0
+    for entry in trajectory:
+        # isinstance gate FIRST so .get is only ever called on a real dict (no crash on junk).
+        if isinstance(entry, dict) and entry.get("tool") == count.tool and entry.get("decision") == "ALLOW":
+            seen += 1
+    return seen >= count.max
+
+
+def _rule_matches(rule: Rule, tool: str, params: dict, trajectory: Any) -> bool:
+    """A rule matches iff tool equals the call's tool AND `after` holds AND `count` holds AND
+    every `when` holds.
+
+    All conjuncts (ADR 0004 §e: `after` conjunctive with tool and when; ADR 0006 §a adds
+    `count` as a further conjunct). WHY iteration order over `when` does not affect the
+    outcome: the result is an AND of predicates, so dict iteration order changes only
+    short-circuit timing, never the decision (ADR 0003 §d, determinism). For a rule with
+    `after is None` / `count is None`, those predicates return True without reading the
+    trajectory, so a 2a rule never touches it.
     """
     if rule.tool != tool:
         return False
     if not _after_holds(rule.after, trajectory):
+        return False
+    if not _count_holds(rule.count, trajectory):
         return False
     for param_name, (operator, operand) in rule.when.items():
         if not _constraint_holds(params, param_name, operator, operand):
@@ -301,7 +347,7 @@ def decide(
 
     for rule in pack.rules:
         if _rule_matches(rule, tool, params, trajectory):
-            decision = Decision.ALLOW if rule.effect == "ALLOW" else Decision.DENY
+            decision = _EFFECT_TO_DECISION.get(rule.effect, Decision.DENY)
             return GatewayResult(decision=decision, rule_id=rule.id)
 
     if pack.default == "deny":
