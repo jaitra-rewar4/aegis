@@ -26,11 +26,12 @@ The verdict is a plain, auditable rule check on the concrete action about to run
 
 ## What is here
 
-- `core/` is the interception loop and the append-only audit log.
+- `core/` is the interception loop and the append-only, hash-chained audit log.
 - `policy/` is the policy engine, the schema and validator, and the example policy packs.
+- `api/` is the FastAPI approval backend: list pending actions, approve or deny them, search the audit trail, and verify the chain.
 - `demos/` holds benign and hostile agent runs you can execute without an API key.
 - `tests/` is the pytest suite, including the red-team attack tests.
-- `web/` is the marketing site and an interactive playground that runs the real policy engine in the browser.
+- `web/` is the site, an interactive playground, a live console that runs the real engine in the browser, and the operator dashboard.
 - `docs/adr/` holds the architecture decision records, one per phase.
 
 ## How the engine decides
@@ -54,14 +55,31 @@ The demos drive an Anthropic tool-use loop when `ANTHROPIC_API_KEY` is set, and 
 
 ## Run the web app
 
-The site lives in `web/` and is a Next.js app. It includes a playground that imports the same engine logic, ported to TypeScript, and runs `decide()` live in the browser. Every allow or deny shown on the site comes from that function, never from a hardcoded value.
+The site lives in `web/` and is a Next.js app. Two of its routes run the engine logic, ported to TypeScript, live in the browser, so every allow or deny they show comes from `decide()` and never from a hardcoded value:
+
+- `/playground` lets you edit a policy and an action and see the verdict.
+- `/console` is a self-contained live console: propose actions, watch the gate return all four verdicts, hold a `REQUIRE_APPROVAL` action for sign-off, and see a real SHA-256 hash-chained audit trail grow and re-verify, all client-side with no backend.
 
 ```
 cd web
 npm install
 npm run dev      # http://localhost:3000
 npm run build    # production build
+npm test         # the TypeScript engine parity and console suites
 ```
+
+The `/dashboard` route is the operator console for a real deployment. Unlike `/console`, it binds to the FastAPI backend below and shows the real audit log, never mock data, so it needs that API running.
+
+## Run the approval API and operator console
+
+The approval backend records a human's approve or deny verdict for held actions and serves the audit trail to the dashboard. It never calls the policy engine; it only authorizes actions the gate already tagged `REQUIRE_APPROVAL`.
+
+```
+pip install -r api/requirements.txt
+uvicorn api.server:app --reload     # http://localhost:8000
+```
+
+With the API running, start the web app (`cd web && npm run dev`) and open `/dashboard`. The pending queue, the searchable audit trail, and the chain-integrity badge are all driven by the live log.
 
 ## Deploy the web app
 
@@ -79,6 +97,7 @@ The CLI path is the same. From `web`, run `npx vercel` for a preview and `npx ve
 - Phase 0, the scaffold.
 - Phase 1, the walking skeleton: a governed tool-use loop, a hardcoded deny rule, an audit log, and a red-team test that proves a destructive action is blocked while a benign run proceeds.
 - Phase 2, the policy engine: declarative YAML packs with per-parameter constraints, a default-deny posture, and trajectory-aware rules that catch a read-then-send exfiltration chain.
+- Phase 3, the full verdict set: `RATE_LIMIT` as a count over the trajectory and `REQUIRE_APPROVAL` as a deferred hold with a FastAPI approval surface, a hash-chained tamper-evident audit log, the operator dashboard bound to that log, and a live in-browser console.
 
 ## License
 
